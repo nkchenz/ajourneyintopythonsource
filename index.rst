@@ -1,11 +1,11 @@
 
 A Journey into Python Source
 ============================
-
 Python源码之旅 
-Jaime Chen<nkchenz@gmail.com> CopyRight (C) 2011
-All Rights Reserved.
 
+Jaime Chen<nkchenz@gmail.com> CopyRight (C) 2011
+
+All Rights Reserved. 转载许可，禁止修改，禁止商业应用。
 
 目录:
 
@@ -15,3 +15,12 @@ All Rights Reserved.
     build
     source
     module
+
+
+Indices and tables
+==================
+
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`
+
