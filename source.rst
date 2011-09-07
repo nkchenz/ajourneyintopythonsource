@@ -13,7 +13,7 @@ Modules     C语言写的模块
 Lib         python语言写的模块
 
 
-main函数
+main函数在哪里
 ----------------------
 Modules/python.c main:
     Modules/main.c Py_Main: python命令行参数的解析

@@ -52,8 +52,8 @@ Modules/posixmodule.c::
 封装。
 
 
-sys.path[0] 怎样找到你的模块
------------------------------
+sys.path[0] python怎样找到你的模块
+--------------------------------------
 如果sys.path[0]是空字符串，则表示查找当前目录。python在搜索模块的时候，会遍历
 sys.path中所有的path，os.path.join(path, module_name)，如果path为'', 则自然
 就是在当前目录查找。
@@ -78,7 +78,7 @@ PYTHONHOME和PYTHONPATH
 calculate_path
 
 
-多版本python
+多版本python的一些信息
 --------------------------
 python在启动的时候，会根据PYTHONHOME查看自身bin所在位置，从而推断出相应
 版本的标准lib所在位置。
@@ -92,7 +92,7 @@ python      可执行文件
 知道了以上信息，就可以构建一个完整的python运行环境了。
 
 
-sys.executable
+sys.executable来自何方
 ------------------------
 Get_Path函数
 
@@ -104,11 +104,11 @@ module_search_path最终将成为sys.path
 文件。如果你在程序里嵌入Python，则可能有问题，虽然影响不大。
 
 
-import语句
+import语句执行路径
 --------------------------
 
 
-imp模块
+imp模块是怎么回事
 -------------------
 imp可以实现更灵活的模块导入
 

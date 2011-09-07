@@ -14,8 +14,10 @@
 
     ./configure --with-pydebug
 
+参见Misc/SpecialBuilds.txt Py_DEBUG
 
-动态扩展加载
+
+禁用动态扩展加载
 ----------------------
 ``HAVE_DYNAMIC_LOADING`` 这个宏决定是否支持加载动态扩展模块，即C代码写的so
 动态库::
