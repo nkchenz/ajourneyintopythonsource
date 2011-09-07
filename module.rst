@@ -1,12 +1,16 @@
 37 Miles 模块
 ===============
 
-builtin的函数在什么定义
+builtin的函数
 -----------------------
 __builtin__ 模块Python/bltinmodule.c
 
+builtin_methods
 
-在哪里指定需要builtin的模块列表
+dir, I saw you!
+
+
+builtin的模块列表
 -------------------------------
 你可以在Modules/Setup.dist文件中指定将哪些模块内置到python可执行程序库中。
 如果Setup文件不存在，make命令会将Setup.dist复制为Setup文件。但是一旦存在, 则
@@ -15,6 +19,7 @@ __builtin__ 模块Python/bltinmodule.c
 
     sys.builtin_module_names
 
+进一步分析如何完成链接
 
 sys模块
 -------
@@ -47,8 +52,8 @@ Modules/posixmodule.c::
 封装。
 
 
-python怎样找到我写的模块
--------------------------
+sys.path[0] 怎样找到你的模块
+-----------------------------
 如果sys.path[0]是空字符串，则表示查找当前目录。python在搜索模块的时候，会遍历
 sys.path中所有的path，os.path.join(path, module_name)，如果path为'', 则自然
 就是在当前目录查找。
@@ -73,7 +78,7 @@ PYTHONHOME和PYTHONPATH
 calculate_path
 
 
-多版本python需要注意些什么
+多版本python
 --------------------------
 python在启动的时候，会根据PYTHONHOME查看自身bin所在位置，从而推断出相应
 版本的标准lib所在位置。
@@ -87,7 +92,7 @@ python      可执行文件
 知道了以上信息，就可以构建一个完整的python运行环境了。
 
 
-sys.executable在哪里设置
+sys.executable
 ------------------------
 Get_Path函数
 
@@ -95,17 +100,20 @@ Modules/getpath.c
 
 module_search_path最终将成为sys.path
 
+一般情况下，sys.executable都会被正确设置，如交互模式，手动启动python命令执行
+文件。如果你在程序里嵌入Python，则可能有问题，虽然影响不大。
 
-import语句的执行路径是什么
+
+import语句
 --------------------------
 
 
-imp模块是怎么回事
+imp模块
 -------------------
-imp是一个模块，可以实现更灵活的模块导入
+imp可以实现更灵活的模块导入
 
 
-socket连接是如何建立的
+建立socket连接
 -----------------------
 
     socket
@@ -114,7 +122,12 @@ socket连接是如何建立的
           connect
 
 
-解释器和c函数怎么交互
+解释器和c函数交互
 -----------------------------
 C扩展里定义的函数，怎么和python VM结合起来？
 
+
+10000 Miles
+===========
+Py_NewInterpreter
+----------------------------

@@ -13,14 +13,14 @@ Modules     C语言写的模块
 Lib         python语言写的模块
 
 
-python的main函数在哪
+main函数
 ----------------------
 Modules/python.c main:
     Modules/main.c Py_Main: python命令行参数的解析
         Modules/pythonrun.c Py_Initialize 初始化解释器
 
 
-如何添加自定义的.h或.c文件
+添加自定义的.h或.c文件
 ----------------------------
 Include/Python.h是python头文件的总索引，具体的常量，数据结构定义在Include目录
 下其他文件中。因为它已被其他python c源代码文件包含，所以只需要将自定义的.h文件
