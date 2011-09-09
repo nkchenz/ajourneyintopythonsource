@@ -39,5 +39,7 @@ PyArg_ParseTupleAndKeywords()
 
 PyArg_Parse()
 
-参阅The Python/C API Release 2.6.7
+为了理解源码中出现的C函数是干什么用的，你最好做一下准备工作，阅读
+`The Python/C API Release 2.6.7
+http://docs.python.org/release/2.6.7/c-api/index.html`_
 
