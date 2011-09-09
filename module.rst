@@ -1,6 +1,11 @@
 37 Miles
 ===============
 
+抛个简单的异常看看
+--------------------
+
+
+
 从urllib2.urlopen到socket
 ----------------------------
 urlopen::
@@ -53,7 +58,7 @@ Lib/socket.py::
                     return sock
 
 在这里，通过getaddrinfo完成dns解析，建了一个socket，sock是内置socketobject类型，
-从sock.connect开始，你将要潜入C代码，在 Modules/socketmodule.c +2027::
+从sock.connect开始，你就潜入C代码的世界了，在 Modules/socketmodule.c +2027::
 
     static PyObject *
     sock_connect(PySocketSockObject *s, PyObject *addro)
@@ -258,13 +263,100 @@ http协议的状态码status 200表示资源找到，但是后续处理出问题
 如何处理？stream？
 
 
-builtin的函数
+builtin的函数在哪
 -----------------------
-__builtin__ 模块Python/bltinmodule.c
+__builtin__ 模块对应的c文件是Python/bltinmodule.c::
 
-builtin_methods
+    static PyMethodDef builtin_methods[] = {
+        {"__import__",      (PyCFunction)builtin___import__, METH_VARARGS | METH_KEYWORDS, import_doc},
+        {"abs",             builtin_abs,        METH_O, abs_doc},
+        ...
+        {"dir",             builtin_dir,        METH_VARARGS, dir_doc},
+        {"divmod",          builtin_divmod,     METH_VARARGS, divmod_doc},
+     
+dir, I saw you! 这就是python dir函数的入口，对应的c代码为builtin_dir::
 
-dir, I saw you!
+        static PyObject *
+        builtin_dir(PyObject *self, PyObject *args)
+        {
+            PyObject *arg = NULL;
+
+            if (!PyArg_UnpackTuple(args, "dir", 0, 1, &arg))
+                return NULL;
+            return PyObject_Dir(arg);
+        }
+
+进行简单的参数处理，获得参数object的指针，然后调用该object自身的dir处理函数，simple。
+至于PyObject_Dir如何工作，则为后话了。现在不妨翻看一下其他的builtin函数代码。
+
+PyArg_UnpackTuple 参数分析
+
++ args 是从python上层传过来的参数tuple
+  
++ "dir" 用于出错时显示哪个函数::
+
+    >>> dir(1, 2)
+    Traceback (most recent call last):
+    File "<stdin>", line 1, in <module>
+    TypeError: dir expected at most 1 arguments, got 2
+
++ 0表示参数个数最少为0，1表示最多为1
+  
++ &arg 提取到的参数存放在这里
+
+详细介绍请见 `C/API <http://docs.python.org/release/2.6.7/c-api/arg.html>`_ 文档
+
+
+METH_O 表示该函数只有一个参数，METH_VARARGS表示参数个数可变，具体定义在Include/methodobject.h::
+
+    jaime@ideer:~/source/Python-2.6.7$ grep -rn METH_O Include/
+    Include/methodobject.h:53:#define METH_OLDARGS  0x0000
+    Include/methodobject.h:56:/* METH_NOARGS and METH_O must not be combined with the flags above. */
+    Include/methodobject.h:58:#define METH_O        0x0008
+    jaime@ideer:~/source/Python-2.6.7$ grep -rn METH_O Python/
+    ...
+    Python/ceval.c:3730:        if (flags & (METH_NOARGS | METH_O)) {
+    Python/ceval.c:3736:            else if (flags & METH_O && na == 1) {
+    jaime@ideer:~/source/Python-2.6.7$ 
+
+在builtin_methods数组中只是声明了一下，运行时的参数检查在Python/ceval.c +3729 完成::
+
+        PCALL(PCALL_CFUNCTION);
+        if (flags & (METH_NOARGS | METH_O)) {
+            PyCFunction meth = PyCFunction_GET_FUNCTION(func);
+            PyObject *self = PyCFunction_GET_SELF(func);
+            if (flags & METH_NOARGS && na == 0) {
+                C_TRACE(x, (*meth)(self,NULL));
+            }
+            else if (flags & METH_O && na == 1) {
+                PyObject *arg = EXT_POP(*pp_stack);
+                C_TRACE(x, (*meth)(self,arg));
+                Py_DECREF(arg);
+            }
+            else {
+                err_args(func, flags, na);
+                x = NULL;
+            }
+        }
+
+如果定义了METH_NOARGS或METH_O，但是参数个数na又不为0或1，则通过err_args报错。
+
+Python/ceval.c +3661::
+
+    static void
+    err_args(PyObject *func, int flags, int nargs)
+    {
+        if (flags & METH_NOARGS)
+            PyErr_Format(PyExc_TypeError,
+                         "%.200s() takes no arguments (%d given)",
+                         ((PyCFunctionObject *)func)->m_ml->ml_name,
+                         nargs);
+        else
+            PyErr_Format(PyExc_TypeError,
+                         "%.200s() takes exactly one argument (%d given)",
+                         ((PyCFunctionObject *)func)->m_ml->ml_name,
+                         nargs);
+    }
 
 
 builtin的模块列表
