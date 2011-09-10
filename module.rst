@@ -354,8 +354,8 @@ Python/ceval.c +3661::
     }
 
 
-抛个简单的异常看看
---------------------
+Hello, exception! 第一个异常
+------------------------------
 
 Modules/posixmodule.c +6313::
 
@@ -552,6 +552,17 @@ Modules/posixmodule.c::
         import posix
         __all__.extend(_get_exports_list(posix))
         del posix
+
+所以os.open实际上是posix.open，代码在Modules/posixmodule.c posix_open。
+
+::
+    >>> import os
+    >>> import posix
+    >>> id(os.open)
+    3077348460L
+    >>> id(posix.open)
+    3077348460L
+    >>>
 
 其他系统有nt，os2等模块，这些才是真正的底层实现，os模块只是提供一个跨平台的
 封装。
