@@ -1,11 +1,6 @@
 37 Miles
 ===============
 
-抛个简单的异常看看
---------------------
-
-
-
 从urllib2.urlopen到socket
 ----------------------------
 urlopen::
@@ -81,6 +76,7 @@ Lib/socket.py::
                  return sock
      
              except error, msg:
+
     jaime@ideer:~/source/Python-2.6.7$ ./python
     Python 2.6.7 (r267:88850, Sep  8 2011, 22:55:29) 
     [GCC 4.5.2] on linux2
@@ -319,23 +315,24 @@ METH_O 表示该函数只有一个参数，METH_VARARGS表示参数个数可变�
 
 在builtin_methods数组中只是声明了一下，运行时的参数检查在Python/ceval.c +3729 完成::
 
-        PCALL(PCALL_CFUNCTION);
-        if (flags & (METH_NOARGS | METH_O)) {
-            PyCFunction meth = PyCFunction_GET_FUNCTION(func);
-            PyObject *self = PyCFunction_GET_SELF(func);
-            if (flags & METH_NOARGS && na == 0) {
-                C_TRACE(x, (*meth)(self,NULL));
-            }
-            else if (flags & METH_O && na == 1) {
-                PyObject *arg = EXT_POP(*pp_stack);
-                C_TRACE(x, (*meth)(self,arg));
-                Py_DECREF(arg);
-            }
-            else {
-                err_args(func, flags, na);
-                x = NULL;
-            }
+
+    PCALL(PCALL_CFUNCTION);
+    if (flags & (METH_NOARGS | METH_O)) {
+        PyCFunction meth = PyCFunction_GET_FUNCTION(func);
+        PyObject *self = PyCFunction_GET_SELF(func);
+        if (flags & METH_NOARGS && na == 0) {
+            C_TRACE(x, (*meth)(self,NULL));
         }
+        else if (flags & METH_O && na == 1) {
+            PyObject *arg = EXT_POP(*pp_stack);
+            C_TRACE(x, (*meth)(self,arg));
+            Py_DECREF(arg);
+        }
+        else {
+            err_args(func, flags, na);
+            x = NULL;
+        }
+    }
 
 如果定义了METH_NOARGS或METH_O，但是参数个数na又不为0或1，则通过err_args报错。
 
@@ -355,6 +352,167 @@ Python/ceval.c +3661::
                          ((PyCFunctionObject *)func)->m_ml->ml_name,
                          nargs);
     }
+
+
+抛个简单的异常看看
+--------------------
+
+Modules/posixmodule.c +6313::
+
+    static PyObject *
+    posix_open(PyObject *self, PyObject *args)
+    {
+        char *file = NULL;
+        int flag;
+        int mode = 0777;
+        int fd;
+
+    #ifdef MS_WINDOWS
+        if (unicode_file_names()) {
+            PyUnicodeObject *po;
+            if (PyArg_ParseTuple(args, "Ui|i:mkdir", &po, &flag, &mode)) {
+                Py_BEGIN_ALLOW_THREADS
+                /* PyUnicode_AS_UNICODE OK without thread
+                   lock as it is a simple dereference. */
+                fd = _wopen(PyUnicode_AS_UNICODE(po), flag, mode);
+                Py_END_ALLOW_THREADS
+                if (fd < 0)
+                    return posix_error();
+                return PyInt_FromLong((long)fd);
+            }
+            /* Drop the argument parsing error as narrow strings
+               are also valid. */
+            PyErr_Clear();
+        }
+    #endif
+
+        if (!PyArg_ParseTuple(args, "eti|i",
+                              Py_FileSystemDefaultEncoding, &file,
+                              &flag, &mode))
+            return NULL;
+
+        Py_BEGIN_ALLOW_THREADS
+        fd = open(file, flag, mode);
+        Py_END_ALLOW_THREADS
+        if (fd < 0)
+            return posix_error_with_allocated_filename(file);
+        PyMem_Free(file);
+        return PyInt_FromLong((long)fd);
+    }
+
+前半部分代码是windows用的，linux的在后半部。先获得参数: file, flag,
+可选的mode。然后调用open系统函数，最后返回一个Int类型的python对象。
+
+仔细观察，如果参数有错误，返回NULL，在python层面则表现为抛出了异常，
+由此是否可以猜测，对于此函数来说，返回值为NULL就表示有异常？还有什么要注意的吗？
+
+再看，如果是文件不存在，open失败，同样在上层表现为异常，但是返回前的处理却不一样::
+
+    static PyObject *
+    posix_error_with_allocated_filename(char* name)
+    {
+        PyObject *rc = PyErr_SetFromErrnoWithFilename(PyExc_OSError, name);
+        PyMem_Free(name);
+        return rc;
+    }
+
+可以看出，open之前，file还是一个空指针，没有指向分配的内存，所以只返回NULL就足够了。
+open之后，不管是成功还是失败，file指针都需要被释放掉。这是需要特别小心的地方，一旦
+处理不到，就会造成内存泄露。原则是，在返回之前，一定要把已申请的资源处理好。
+
+现在有了足够的信心，照着原有代码的例子，我们可以抛出自己的异常。用什么函数呢？
+PyErr_SetFromErrnoWithFilename 看着像和异常有关，翻看代码，可以看到类似函数::
+
+    +2282
+    if (len >= MAX_PATH) {
+        PyErr_SetString(PyExc_ValueError, "path too long");
+        return NULL;
+    }
+
+    +2831
+    else if (!PyTuple_Check(arg) || PyTuple_Size(arg) != 2) {
+        PyErr_SetString(PyExc_TypeError,
+                        "utime() arg 2 must be a tuple (atime, mtime)");
+        goto done;
+    }
+ 
+PyErr_SetString 抛出一个纯c字符串，不需要担心对象引用，正是我们想要的。第一个
+参数为异常的类型。
+
+file是 `char *` 类型，这意味是我们可以用strcmp。
+
+代码如下::
+
+    jaime@ideer:~/source/Python-2.6.7$ git df
+    diff --git a/Modules/posixmodule.c b/Modules/posixmodule.c
+    index 822bc11..7501f0d 100644
+    --- a/Modules/posixmodule.c
+    +++ b/Modules/posixmodule.c
+    @@ -6337,11 +6337,19 @@ posix_open(PyObject *self, PyObject *args)
+         }
+     #endif
+     
+    +    printf("Entering posix_open\n");
+    +
+         if (!PyArg_ParseTuple(args, "eti|i",
+                               Py_FileSystemDefaultEncoding, &file,
+                               &flag, &mode))
+             return NULL;
+     
+    +    if (strcmp(file, "hello") == 0) {
+    +        PyErr_SetString(PyExc_ValueError, "Hello, exception!");
+    +        PyMem_Free(file);
+    +        return NULL;
+    +    }
+    +
+         Py_BEGIN_ALLOW_THREADS
+         fd = open(file, flag, mode);
+         Py_END_ALLOW_THREADS
+    jaime@ideer:~/source/Python-2.6.7$
+
+
+输出::
+
+    jaime@ideer:~/source/Python-2.6.7$ ./python 
+    Python 2.6.7 (r267:88850, Sep 10 2011, 12:12:00) 
+    [GCC 4.5.2] on linux2
+    Type "help", "copyright", "credits" or "license" for more information.
+    >>> import os
+    >>> os.open()
+    Entering posix_open
+    Traceback (most recent call last):
+      File "<stdin>", line 1, in <module>
+    TypeError: function takes at least 2 arguments (0 given)
+    >>> os.open('hello', os.O_RDONLY)
+    Entering posix_open
+    Traceback (most recent call last):
+      File "<stdin>", line 1, in <module>
+    ValueError: Hello, exception!
+    >>> os.open('test', os.O_RDONLY)
+    Entering posix_open
+    Traceback (most recent call last):
+      File "<stdin>", line 1, in <module>
+    OSError: [Errno 2] No such file or directory: 'test'
+    >>> os.open('test', os.O_WRONLY | os.O_CREAT)
+    Entering posix_open
+    3
+    >>> 
+
+注意三个异常发生的时刻，以及类型TypeError, ValueError,
+OSError。另一个有趣的函数是 PyErr_Format，可以抛出一个格式化的字符串。
+
+Python/builtinmodule.c +188::
+
+    if (kwdict != NULL && !PyDict_Check(kwdict)) {
+        PyErr_Format(PyExc_TypeError,
+                     "apply() arg 3 expected dictionary, found %s",
+                     kwdict->ob_type->tp_name);
+        goto finally;
+    }
+ 
+更多异常处理函数参见 Include/pyerrors.h, Python/errors.c。
+
+PyArg_ParseTuple 参见 The Python/C API。
 
 
 builtin的模块列表
