@@ -183,8 +183,7 @@ http_response负责对服务器响应进行处理。如果状态码如果不是2
 start_response和exc_info
 ------------------------------
 
-`wsgi <http://www.python.org/dev/peps/pep-0333/>`_ 规定了两个函数, write 
-和start_response::
+`WSGI`_ 规定了两个函数, write 和start_response::
 
     def start_response(status, response_headers, exc_info=None):
 
@@ -262,6 +261,7 @@ http协议的状态码status 200表示资源找到，但是后续处理出问题
 是否可以改变应用逻辑，全部处理完毕后一起发送header和body？区分应用相关，数据量大或长时间的应用
 如何处理？stream？
 
+.. _`WSGI`: http://www.python.org/dev/peps/pep-0333/
 
 builtin的函数在哪
 -----------------------
@@ -303,8 +303,6 @@ PyArg_UnpackTuple 参数分析
 + 0表示参数个数最少为0，1表示最多为1
   
 + &arg 提取到的参数存放在这里
-
-详细介绍请见 `C/API <http://docs.python.org/release/2.6.7/c-api/arg.html>`_ 文档
 
 
 METH_O 表示该函数只有一个参数，METH_VARARGS表示参数个数可变，具体定义在Include/methodobject.h::
