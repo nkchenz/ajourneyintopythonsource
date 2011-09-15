@@ -1,5 +1,30 @@
-37 Miles
+37 Miles 模块
 ===============
+
+自定义一个package到标准库
+------------------------------
+直接在Lib/下面加.py文件，make install会自动安装prefix目录。但是如果你要添加目录，
+则不会被安装，需要修改Makefile.pre.in::
+
+    jaime@ideer:~/source/Python-2.6.7$ git df
+    diff --git a/Makefile.pre.in b/Makefile.pre.in
+    index 0329d67..28a17bd 100644
+    --- a/Makefile.pre.in
+    +++ b/Makefile.pre.in
+    @@ -828,7 +828,7 @@ LIBSUBDIRS= lib-tk site-packages test test/output test/data \
+                    ctypes ctypes/test ctypes/macholib idlelib idlelib/Icons \
+                    distutils distutils/command distutils/tests $(XMLLIBSUBDIRS) \
+                    multiprocessing multiprocessing/dummy \
+    -               lib-old \
+    +               lib-old foo\
+                    curses pydoc_data $(MACHDEPS)
+     libinstall:    build_all $(srcdir)/Lib/$(PLATDIR)
+            @for i in $(SCRIPTDIR) $(LIBDEST); \
+    jaime@ideer:~/source/Python-2.6.7$
+
+重新configure, make install。make用LIBSUBDIRS来控制需要复制Lib/下面哪些子目录，
+plat-*平台模块目录在安装时make会自动判断。
+
 
 从urllib2.urlopen到socket
 ----------------------------
@@ -553,9 +578,8 @@ Modules/posixmodule.c::
         __all__.extend(_get_exports_list(posix))
         del posix
 
-所以os.open实际上是posix.open，代码在Modules/posixmodule.c posix_open。
+所以os.open实际上是posix.open，代码在Modules/posixmodule.c posix_open::
 
-::
     >>> import os
     >>> import posix
     >>> id(os.open)
