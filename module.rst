@@ -21,6 +21,8 @@
      libinstall:    build_all $(srcdir)/Lib/$(PLATDIR)
             @for i in $(SCRIPTDIR) $(LIBDEST); \
     jaime@ideer:~/source/Python-2.6.7$
+    jaime@ideer:~/source/Python-2.6.7$ ls Lib/foo/
+    bar.py  __init__.py
 
 重新configure, make install。make用LIBSUBDIRS来控制需要复制Lib/下面哪些子目录，
 plat-*平台模块目录在安装时make会自动判断。
