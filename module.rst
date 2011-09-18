@@ -3,6 +3,163 @@
 
 site.py是怎么回事
 ---------------------
+如果你安装了许多第三方模块，而且是在不同的地方，那么程序如何找到这些模块？
+是的，你可以在程序里面修改sys.path，但是每个程序都这么做，颇有不便。
+
+site.py即为解决此问题。它是一个公有库，在python启动时自动加载，分析特定路径
+下的.pth文件并自动设置sys.path，你不需要做额外的操作就可以导入第三方模块。
+
+导入site模块::
+
+    jaime@westeros:~/source/Python-2.6.7$ grep -rn site Python
+    ...
+    Python/pythonrun.c:255:        initsite(); /* Module site */
+    Python/pythonrun.c:606:            initsite();
+    Python/pythonrun.c:705:/* Import the site module (not into __main__ though) */
+    Python/pythonrun.c:708:initsite(void)
+    Python/pythonrun.c:711:    m = PyImport_ImportModule("site");
+    ...
+    jaime@westeros:~/source/Python-2.6.7$ 
+
+
+    /* Import the site module (not into __main__ though) */
+
+    static void
+    initsite(void)
+    {
+        PyObject *m, *f;
+        m = PyImport_ImportModule("site");
+        if (m == NULL) {
+            f = PySys_GetObject("stderr");
+            if (Py_VerboseFlag) {
+                PyFile_WriteString(
+                    "'import site' failed; traceback:\n", f);
+                PyErr_Print();
+            }
+            else {
+                PyFile_WriteString(
+                  "'import site' failed; use -v for traceback\n", f);
+                PyErr_Clear();
+            }
+        }
+        else {
+            Py_DECREF(m);
+        }
+    }
+
+
+遍历sys.path，搜索.pth文件, Lib/site.py::
+
+    def removeduppaths():
+        """ Remove duplicate entries from sys.path along with making them
+        absolute"""
+        # This ensures that the initial path provided by the interpreter contains
+        # only absolute pathnames, even if we're running from the build directory.
+        L = []
+        known_paths = set()
+        for dir in sys.path:
+            # Filter out duplicate paths (on case-insensitive file systems also
+            # if they only differ in case); turn relative paths into absolute
+            # paths.
+            dir, dircase = makepath(dir)
+            if not dircase in known_paths:
+                L.append(dir)
+                known_paths.add(dircase)
+        sys.path[:] = L
+        return known_paths
+
+    def main():
+        global ENABLE_USER_SITE
+
+        abs__file__()
+        known_paths = removeduppaths()
+        if (os.name == "posix" and sys.path and
+            os.path.basename(sys.path[-1]) == "Modules"):
+            addbuilddir()
+        if ENABLE_USER_SITE is None:
+            ENABLE_USER_SITE = check_enableusersite()
+        known_paths = addusersitepackages(known_paths)
+        known_paths = addsitepackages(known_paths)
+        if sys.platform == 'os2emx':
+            setBEGINLIBPATH()
+        setquit()
+        setcopyright()
+        sethelper()
+        aliasmbcs()
+        setencoding()
+        execsitecustomize()
+        if ENABLE_USER_SITE:
+            execusercustomize()
+        # Remove sys.setdefaultencoding() so that users cannot change the
+        # encoding after initialization.  The test for presence is needed when
+        # this module is run as a script, because this code is executed twice.
+        if hasattr(sys, "setdefaultencoding"):
+            del sys.setdefaultencoding
+
+Bonus，sys.setdefaultencoding在这里被删掉了，系统已经完成初始化，再改变内部编码比较困难。
+
+
+系统默认2.7python的示例::
+
+    jaime@westeros:~/source/Python/Python-2.6.7$ python
+    Python 2.7.1+ (r271:86832, Apr 11 2011, 18:05:24) 
+    [GCC 4.5.2] on linux2
+    Type "help", "copyright", "credits" or "license" for more information.
+    >>> import site
+    >>> site.__file__
+    '/usr/lib/python2.7/site.pyc'
+    >>> import sys
+    >>> sys.path
+    ['', '/usr/local/lib/python2.7/dist-packages/Flask-0.7.2-py2.7.egg',
+    '/usr/local/lib/python2.7/dist-packages/Jinja2-2.6-py2.7.egg',
+    '/usr/local/lib/python2.7/dist-packages/Werkzeug-0.7.1-py2.7.egg',
+    '/usr/local/lib/python2.7/dist-packages/flup-1.0.2-py2.7.egg',
+    '/usr/local/lib/python2.7/dist-packages/MySQL_python-1.2.3-py2.7-linux-i686.egg',
+    '/usr/lib/python2.7', '/usr/lib/python2.7/plat-linux2',
+    '/usr/lib/python2.7/lib-tk', '/usr/lib/python2.7/lib-old',
+    '/usr/lib/python2.7/lib-dynload', '/usr/local/lib/python2.7/dist-packages',
+    '/usr/lib/python2.7/dist-packages', '/usr/lib/python2.7/dist-packages/PIL',
+    '/usr/lib/pymodules/python2.7/gtk-2.0',
+    '/usr/lib/python2.7/dist-packages/gst-0.10',
+    '/usr/lib/python2.7/dist-packages/gtk-2.0', '/usr/lib/pymodules/python2.7',
+    '/usr/lib/pymodules/python2.7/ubuntuone-storage-protocol',
+    '/usr/lib/pymodules/python2.7/ubuntuone-control-panel',
+    '/usr/lib/pymodules/python2.7/ubuntuone-client']
+    >>> sys.prefix
+    '/usr'
+    >>> sys.executable
+    '/usr/bin/python'
+
+
+    jaime@westeros:~/source/Python/Python-2.6.7$ ls /usr/local/lib/python2.7/dist-packages/
+    django                 easy-install.pth       flup-1.0.2-py2.7.egg
+    MySQL_python-1.2.3-py2.7-linux-i686.egg
+    Django-1.2.7.egg-info  Flask-0.7.2-py2.7.egg  Jinja2-2.6-py2.7.egg
+    Werkzeug-0.7.1-py2.7.egg
+    jaime@westeros:~/source/Python/Python-2.6.7$ cat /usr/local/lib/python2.7/dist-packages/easy-install.pth 
+    import sys; sys.__plen = len(sys.path)
+    ./Flask-0.7.2-py2.7.egg
+    ./Jinja2-2.6-py2.7.egg
+    ./Werkzeug-0.7.1-py2.7.egg
+    ./flup-1.0.2-py2.7.egg
+    ./MySQL_python-1.2.3-py2.7-linux-i686.egg
+    import sys; new=sys.path[sys.__plen:]; del sys.path[sys.__plen:];
+    p=getattr(sys,'__egginsert',0); sys.path[p:p]=new; sys.__egginsert =
+    p+len(new)
+    jaime@westeros:~/source/Python/Python-2.6.7$ 
+
+
+更多参考:
+`Installing Python Modules`_
+`Distributing Python Modules`_
+
+
+.. _Installing Python Modules: http://docs.python.org/release/2.6.7/install/index.html 
+.. _Distributing Python Modules: http://docs.python.org/release/2.6.7/distutils/index.html
+
+Python- site-package dirs and .pth files 
+http://grahamwideman.wikispaces.com/Python-+site-package+dirs+and+.pth+files
+
 
 自定义一个package到标准库
 ------------------------------
@@ -28,7 +185,7 @@ site.py是怎么回事
     bar.py  __init__.py
 
 重新configure, make install。make用LIBSUBDIRS来控制需要复制Lib/下面哪些子目录，
-plat-*平台模块目录在安装时make会自动判断。
+plat-\*平台模块目录在安装时make会自动判断。
 
 
 从urllib2.urlopen到socket
