@@ -1,12 +1,80 @@
-37 Miles 模块
+37 Miles
 ===============
 
-site.py是怎么回事
----------------------
-如果你安装了许多第三方模块，而且是在不同的地方，那么程序如何找到这些模块？
-是的，你可以在程序里面修改sys.path，但是每个程序都这么做，颇有不便。
+setuptools
+---------------
 
-site.py即为解决此问题。它是一个公有库，在python启动时自动加载，分析特定路径
+如果要使用 `easy_install` 或者 `python setup.py install` 的方式安装第三方包，
+则需要安装 `python-setuptools <http://pypi.python.org/pypi/setuptools/>`_ 。
+
+
+FIXME: 
+
+* easy_install的替代品 `pip <http://pypi.python.org/pypi/pip>`_ ?
+
+* setuptools 如何安装自己，bootstrap也是一个有意思的问题。
+
+
+::
+
+    jaime@westeros:~/Downloads/setuptools-0.6c11/setuptools$ ls
+    archive_util.py  command     dist.py       gui.exe      package_index.py
+    tests
+    cli.exe          depends.py  extension.py  __init__.py  sandbox.py
+
+
+setup.py中常见的setup函数，来自于setuptools模块::
+
+    from setuptools import setup
+
+setuptools/__init__.py::
+
+    import distutils.core, setuptools.command     
+    ...
+    setup = distutils.core.setup
+
+最终却是标准库disutils提供的，参见 Lib/distutils/core.py 。
+
+setuptools需要python-devel包，否则会报错：
+
+    error: invalid Python installation: unable to open /usr/lib/python2.6/config/Makefile (No such file or directory)
+
+python-devel 里面到底有什么呢？请看 http://packages.debian.org/wheezy/i386/python2.6-dev/filelist 。
+
+如果当前python是未经安装的，仍在源码目录中的，为什么setuptools不把包安装到Lib/site-packages呢？仍然是正确安装到prefix目录。 setuptools是怎么决定要安装到哪个目录呢？可能在setuptools/command/easy_install.py::
+
+    INSTALL_SCHEMES = dict(
+        posix = dict(
+            install_dir = '$base/lib/python$py_version_short/site-packages',
+            script_dir  = '$base/bin',
+        ),
+    )
+
+其实不管安装工具多么复杂，最主要的有两点：
+
+#. 如果是纯py代码，那么复制到python路径就行了，比如site-packages
+
+#. 如果是python c扩展，则需要找到python头文件，其他依赖库头文件，以及编译链接选项如宏定义等，有了这些，就可以成功编译
+
+#. 一些公用的script，data文件
+
+安装工具提供的附加值在于package的管理，安装，卸载，版本依赖关系处理，升级更新等。
+
+
+问题: 一般运行 `python setup.py install` ，package就会被安装到python的路径。那么如果系统内
+有多个版本的python，能否修改setuptools，用 `pythonA setup.py install` 将package安装pythonB的路径？
+
+    pythonA setup.py --python pythonB --location ~/pythonB/site-packages 
+
+实际上，可以做到运行安装程序的python，和要把package安装到哪个python没有关系
+
+
+site.py是什么
+---------------------
+如果你安装了许多第三方模块，这些包分散在系统的不同地方，那么程序怎么找到这些
+模块呢？是，你可以在程序里修改sys.path，但每个程序都这么做，未免有些麻烦。
+
+site.py就是解决这个问题的。它是一个公有库，在python启动时自动加载，分析特定路径
 下的.pth文件并自动设置sys.path，你不需要做额外的操作就可以导入第三方模块。
 
 导入site模块::
@@ -48,24 +116,67 @@ site.py即为解决此问题。它是一个公有库，在python启动时自动�
     }
 
 
-遍历sys.path，搜索.pth文件, Lib/site.py::
+Lib/site.py::
 
-    def removeduppaths():
-        """ Remove duplicate entries from sys.path along with making them
-        absolute"""
-        # This ensures that the initial path provided by the interpreter contains
-        # only absolute pathnames, even if we're running from the build directory.
-        L = []
-        known_paths = set()
-        for dir in sys.path:
-            # Filter out duplicate paths (on case-insensitive file systems also
-            # if they only differ in case); turn relative paths into absolute
-            # paths.
-            dir, dircase = makepath(dir)
-            if not dircase in known_paths:
-                L.append(dir)
-                known_paths.add(dircase)
-        sys.path[:] = L
+    PREFIXES = [sys.prefix, sys.exec_prefix]
+    
+    ...
+
+    def addpackage(sitedir, name, known_paths):
+        """Process a .pth file within the site-packages directory:
+           For each line in the file, either combine it with sitedir to a path
+           and add that to known_paths, or execute it if it starts with 'import '.
+        """
+        ...
+        with f:
+            for line in f:
+                ...
+                line = line.rstrip()
+                dir, dircase = makepath(sitedir, line)
+                if not dircase in known_paths and os.path.exists(dir):
+                    sys.path.append(dir)
+                    known_paths.add(dircase)
+        if reset:
+            known_paths = None
+        return known_paths
+
+
+    def addsitedir(sitedir, known_paths=None):
+        """Add 'sitedir' argument to sys.path if missing and handle .pth files in
+        'sitedir'"""
+        ....
+        dotpth = os.extsep + "pth"
+        names = [name for name in names if name.endswith(dotpth)]
+        for name in sorted(names):
+            addpackage(sitedir, name, known_paths)
+        if reset:
+            known_paths = None
+        return known_paths
+
+    def addsitepackages(known_paths):
+        """Add site-packages (and possibly site-python) to sys.path"""
+        sitedirs = []
+        seen = []
+
+        for prefix in PREFIXES:
+            if not prefix or prefix in seen:
+                continue
+            seen.append(prefix)
+
+            if sys.platform in ('os2emx', 'riscos'):
+                sitedirs.append(os.path.join(prefix, "Lib", "site-packages"))
+            elif os.sep == '/':
+                sitedirs.append(os.path.join(prefix, "lib",
+                                            "python" + sys.version[:3],
+                                            "site-packages"))
+                sitedirs.append(os.path.join(prefix, "lib", "site-python"))
+            else:
+            ...
+
+        for sitedir in sitedirs:
+            if os.path.isdir(sitedir):
+                addsitedir(sitedir, known_paths)
+
         return known_paths
 
     def main():
@@ -97,6 +208,13 @@ site.py即为解决此问题。它是一个公有库，在python启动时自动�
             del sys.setdefaultencoding
 
 Bonus，sys.setdefaultencoding在这里被删掉了，系统已经完成初始化，再改变内部编码比较困难。
+
+sys.path 在 removeduppaths 函数中被加入到 known_paths
+
+'site-packages' 目录的具体位置在 addsitepackages 函数中探测， sitedirs取决于PREFIXES，即sys.prefix,
+sys.exec_prefix python的安装路径。
+
+.pth 文件的扫描在 addsitedir 中完成，将.pth文件的第三方包目录添加到sys.path则是在 addpackage 。
 
 
 系统默认2.7python的示例::
@@ -779,6 +897,12 @@ PYTHONHOME和PYTHONPATH
 -----------------------
 calculate_path
 
+http://docs.python.org/tutorial/modules.html#the-module-search-path
+
+http://docs.python.org/using/cmdline.html#envvar-PYTHONPATH
+
+http://docs.python.org/using/cmdline.html#envvar-PYTHONHOME
+
 
 多版本python的一些信息
 --------------------------
@@ -786,12 +910,16 @@ python在启动的时候，会根据PYTHONHOME查看自身bin所在位置，从�
 版本的标准lib所在位置。
 
 python运行需要的信息如下：
-python      可执行文件
-系统标准lib 用.py写的自带模块，.so扩展
-用户模块    用户编写的.py文件
-第三方包 你的程序中导入的第三方模块  
 
-知道了以上信息，就可以构建一个完整的python运行环境了。
+* 可执行文件python
+
+* .py标准库，.so c扩展
+
+* 第三方package，你在程序中导入的非标准库
+
+* 用户模块, 你编写的.py文件
+
+知道以上信息，就可以构建一个完整的python运行环境。
 
 
 sys.executable来自何方
