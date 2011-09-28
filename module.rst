@@ -869,7 +869,7 @@ Modules/posixmodule.c::
     >>>
 
 其他系统有nt，os2等模块，这些才是真正的底层实现，os模块只是提供一个跨平台的
-封装。
+封装。另，可以看出，os.path实际上posixpath模块的一个别名，代码在Lib/posixpath.py。
 
 
 sys.path[0] python怎样找到你的模块
