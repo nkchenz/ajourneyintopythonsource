@@ -1,2 +1,960 @@
 100 Miles
 ===========
+
+mod_wsgi 流程简单分析: 一个嵌入python的例子
+--------------------------------------------
+
+WSGI: 一个协议，描述通用服务器与python app之间的接口规范
+
+wsgi app：遵守wsgi规范的python app
+
+mod_wsgi： apache服务器的一个扩展模块, wsgi协议在apache服务器上的一个实现，有了它，
+你就可以在apache上运行wsgi app
+
+总的来说，WSGIScriptAlias 模式，python解释器被嵌入到apache进程当中，请求处理代码是在apache的
+worker子进程中执行。WSGIDaemonProcess python解释器运行在单独的进程之中，和apache进程是隔离的。
+
+在WSGIScriptAlias 模式下，mod_wsgi怎么完成初始化？一个简单http请求，处理流程是什么？
+下文试进行简要分析。
+
+apache配置::
+
+     WSGIScriptAlias  /hello /var/www/hello.wsgi
+
+告诉apache hello.wsgi是一个mod_wsgi app，所有 /hello/ 下面的请求都转发给它。
+
+wsgi代码::
+
+    jaime@westeros:~/source/mod-wsgi-3.3$ ls
+    build-2.6  build-3.2     debian    Makefile.in  mod_wsgi.lo
+    posix-ap2X.mk.in   win32-ap22py31.mk
+    build-2.7  configure     LICENCE   mod_wsgi.c   mod_wsgi.slo      README
+    build-3.1  configure.ac  Makefile  mod_wsgi.la  posix-ap1X.mk.in
+    win32-ap22py26.mk
+
+mod_wsgi.c有很多代码是关于apache 1.3的，和2.0代码有很多重名的函数，容易误导，
+不便于阅读，可使用 unifdef 工具，将1.3相关的代码全部用空行替代，保留行号
+的同时又清爽了许多::
+
+    jaime@westeros:~/source/mod-wsgi-3.3$ sudo apt-get install unifdef
+    jaime@westeros:~/source/mod-wsgi-3.3$ unifdef -DAP_SERVER_MAJORVERSION_NUMBER=2 -b mod_wsgi.c  > mod_wsgi-clean.c
+
+
+apache模块的入口 mod_wsgi.c +15085 ::
+
+    /* Dispatch list for API hooks */
+
+    module AP_MODULE_DECLARE_DATA wsgi_module = {
+        STANDARD20_MODULE_STUFF,
+        wsgi_create_dir_config,    /* create per-dir    config structures */
+        wsgi_merge_dir_config,     /* merge  per-dir    config structures */
+        wsgi_create_server_config, /* create per-server config structures */
+        wsgi_merge_server_config,  /* merge  per-server config structures */
+        wsgi_commands,             /* table of config file commands       */
+        wsgi_register_hooks        /* register hooks                      */
+    };
+
+配置选项对应的函数 mod_wsgi.c +14982::
+
+    static const command_rec wsgi_commands[] =
+    {
+        AP_INIT_RAW_ARGS("WSGIScriptAlias", wsgi_add_script_alias,
+            NULL, RSRC_CONF, "Map location to target WSGI script file."),
+        ...
+
+    #if defined(MOD_WSGI_WITH_DAEMONS)
+        AP_INIT_RAW_ARGS("WSGIDaemonProcess", wsgi_add_daemon_process,
+            NULL, RSRC_CONF, "Specify details of daemon processes to start."),
+        ...
+
+        AP_INIT_TAKE1("WSGILazyInitialization", wsgi_set_lazy_initialization,
+            NULL, RSRC_CONF, "Enable/Disable lazy Python initialization."),
+    #endif
+        ...
+
+    };
+
+wsgi_add_script_alias大致做了一些初始化的工作，告诉apache dispatcher留意了，
+看到类似XXX的url，要调用我们来处理。
+
+有意思的是这个 wsgi_register_hooks mod_wsgi.c +14931+::
+
+    static void wsgi_register_hooks(apr_pool_t *p)
+    {
+        ...
+        static const char * const p6[] = { "mod_python.c", NULL };
+
+        ap_hook_post_config(wsgi_hook_init, p6, NULL, APR_HOOK_MIDDLE);
+        ap_hook_child_init(wsgi_hook_child_init, p6, NULL, APR_HOOK_MIDDLE);
+
+        ap_hook_translate_name(wsgi_hook_intercept, p1, n1, APR_HOOK_MIDDLE);
+        ap_hook_handler(wsgi_hook_handler, NULL, NULL, APR_HOOK_MIDDLE);
+        ...
+    }
+
+从名字上看，wsgi_hook_init, wsgi_hook_child_init是做初始化工作的。
+我们先看wsgi_hook_handler做了什么 mod_wsgi.c +8690::
+
+    static int wsgi_hook_handler(request_rec *r)
+    {
+         ...
+
+        /*
+         * Only process requests for this module. First check for
+         * where target is the actual WSGI script. Then need to
+         * check for the case where handler name mapped to a handler
+         * script definition.
+         */
+        // blablabla 一堆参数检查代码
+        ...
+
+        /* Build the sub process environment. */
+
+        // wsgi协议相关环境变量在这里设置，每次请求都不一样
+        // 故此处是每次请求的必经之地
+        wsgi_build_environment(r);
+
+        ...
+
+        // WSGIDaemonProcess 模式处理代码
+        /*
+         * Execute the target WSGI application script or proxy
+         * request to one of the daemon processes as appropriate.
+         */
+
+    #if defined(MOD_WSGI_WITH_DAEMONS)
+        status = wsgi_execute_remote(r);
+
+        if (status != DECLINED)
+            return status;
+    #endif
+
+        ...
+
+        return wsgi_execute_script(r);
+    }
+
+
+wsgi_hook_handler 是每次请求的入口，最后调用wsgi_execute_script mod_wsgi.c +6404::
+
+    static int wsgi_execute_script(request_rec *r)
+    {
+
+        ...
+
+        /* Grab request configuration. */
+
+        config = (WSGIRequestConfig *)ap_get_module_config(r->request_config,
+                                                           &wsgi_module);
+
+        /*
+         * Acquire the desired python interpreter. Once this is done
+         * it is safe to start manipulating python objects.
+         */
+
+        // 获得解释器，一个wsgi app可以运行在单独的python解释器里
+        // 在一个进程里，可以有多个解释器同时运行
+
+        // application_group 在 wsgi_application_group 函数中设置
+        // 与req请求的servername，port，scriptname有关，每次请求对应于哪个解释器由它来决定
+        interp = wsgi_acquire_interpreter(config->application_group);
+
+        if (!interp) {
+            ap_log_rerror(APLOG_MARK, WSGI_LOG_CRIT(0), r,
+                          "mod_wsgi (pid=%d): Cannot acquire interpreter '%s'.",
+                          getpid(), config->application_group);
+
+            return HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        /* Calculate the Python module name to be used for script. */
+
+        if (config->handler_script && *config->handler_script)
+            script = config->handler_script;
+        else
+            script = r->filename;
+
+        // 找到这个app的python模块名字
+        name = wsgi_module_name(r->pool, script);
+        ...
+
+        modules = PyImport_GetModuleDict();
+        module = PyDict_GetItemString(modules, name);
+
+        Py_XINCREF(module);
+
+        if (module)
+            exists = 1;
+
+        /*
+         * If script reloading is enabled and the module for it has
+         * previously been loaded, see if it has been modified since
+         * the last time it was accessed. For a handler script will
+         * also see if it contains a custom function for determining
+         * if a reload should be performed.
+         */
+
+        // Reload相关代码，检测app代码是否被修改
+        if (module && config->script_reloading) {
+            if (wsgi_reload_required(r->pool, r, script, module, r->filename)) {
+
+                ...
+
+    #if defined(MOD_WSGI_WITH_DAEMONS)
+                if (*config->process_group) {
+                    /*
+                     * Need to restart the daemon process. We bail
+                     * out on the request process here, sending back
+                     * a special response header indicating that
+                     * process is being restarted and that remote
+                     * end should abandon connection and attempt to
+                     * reconnect again. We also need to signal this
+                     * process so it will actually shutdown. The
+                     * process supervisor code will ensure that it
+                     * is restarted.
+                     */
+
+                    Py_BEGIN_ALLOW_THREADS
+                    ap_log_rerror(APLOG_MARK, WSGI_LOG_INFO(0), r,
+                                 "mod_wsgi (pid=%d): Force restart of "
+                                 "process '%s'.", getpid(),
+                                 config->process_group);
+                    Py_END_ALLOW_THREADS
+                    ...
+
+                    wsgi_release_interpreter(interp);
+
+                    r->status = HTTP_INTERNAL_SERVER_ERROR;
+                    r->status_line = "0 Rejected";
+
+                    wsgi_daemon_shutdown++;
+
+                    // WSGIDaemonProcess 模式，杀掉当前daemon进程，重新加载
+                    kill(getpid(), SIGINT);
+
+                    return OK;
+                }
+                else {
+                ...
+
+                    PyDict_DelItemString(modules, name);
+                }
+    #else
+                /*
+                 * Need to reload just the script module. Remove
+                 * the module from the modules dictionary before
+                 * reloading it again. If code is executing
+                 * within the module at the time, the callers
+                 * reference count on the module should ensure
+                 * it isn't actually destroyed until it is
+                 * finished.
+                 */
+
+               // WSGIScriptAlias 模式，删除旧的模块
+                PyDict_DelItemString(modules, name);
+    #endif
+            }
+        }
+        ...
+
+        // 如果是第一次请求，则需要加载该模块
+        /* Load module if not already loaded. */
+
+        if (!module) {
+            module = wsgi_load_source(r->pool, r, name, exists, script,
+                                      config->process_group,
+                                      config->application_group);
+        }
+        ...
+
+
+        // 激动人心的时刻到了，执行app代码！
+        status = HTTP_INTERNAL_SERVER_ERROR;
+
+        /* Determine if script exists and execute it. */
+        if (module) {
+            PyObject *module_dict = NULL;
+            PyObject *object = NULL;
+
+            module_dict = PyModule_GetDict(module);
+            object = PyDict_GetItemString(module_dict, config->callable_object);
+
+            if (object) {
+                AdapterObject *adapter = NULL;
+                adapter = newAdapterObject(r);
+
+                if (adapter) {
+                    PyObject *method = NULL;
+                    PyObject *args = NULL;
+
+                    Py_INCREF(object);
+                    status = Adapter_run(adapter, object); // 这里，这里
+                    Py_DECREF(object);
+                    ...
+            }
+            else {
+                Py_BEGIN_ALLOW_THREADS
+                ap_log_rerror(APLOG_MARK, WSGI_LOG_ERR(0), r,
+                              "mod_wsgi (pid=%d): Target WSGI script '%s' does "
+                              "not contain WSGI application '%s'.",
+                              getpid(), script, config->callable_object);
+                Py_END_ALLOW_THREADS
+
+                status = HTTP_NOT_FOUND;
+            }
+        }
+
+        // 错误处理
+        /* Log any details of exceptions if execution failed. */
+
+        if (PyErr_Occurred())
+            wsgi_log_python_error(r, NULL, r->filename);
+
+        /* Cleanup and release interpreter, */
+
+        Py_XDECREF(module);
+
+        wsgi_release_interpreter(interp);
+
+        return status;
+    }
+
+Adapter_run +3823::
+
+    static int Adapter_run(AdapterObject *self, PyObject *object)
+    {
+        ...
+
+        vars = Adapter_environ(self);
+
+        // 获取 start_response 函数
+        start = PyObject_GetAttrString((PyObject *)self, "start_response");
+
+        // 准备参数，还记得 def application(environ, start_response) 吗？
+        args = Py_BuildValue("(OO)", vars, start);
+
+        // 执行app代码
+        self->sequence = PyEval_CallObject(object, args);
+
+        if (self->sequence != NULL) {
+            if (!Adapter_process_file_wrapper(self)) {
+                int aborted = 0;
+
+                iterator = PyObject_GetIter(self->sequence);
+
+                if (iterator != NULL) {
+                    PyObject *item = NULL;
+
+                    // 遍历返回的iterator，输出每一行
+                    while ((item = PyIter_Next(iterator))) {
+                        ...
+
+                        if (length && !Adapter_output(self, msg, length, 0)) {
+                            if (!PyErr_Occurred())
+                                aborted = 1;
+                            Py_DECREF(item);
+                            break;
+                        }
+
+                    }
+                }
+                ...
+
+            }
+
+
+            // 如果返回的seq有close方法则调用
+            if (PyObject_HasAttrString(self->sequence, "close")) {
+                PyObject *args = NULL;
+                PyObject *data = NULL;
+
+                close = PyObject_GetAttrString(self->sequence, "close");
+
+                args = Py_BuildValue("()");
+                data = PyEval_CallObject(close, args);
+
+                Py_DECREF(args);
+                Py_XDECREF(data);
+                Py_DECREF(close);
+            }
+            ...
+
+        }
+        ...
+
+    }
+
+
+AdapterObject 是自定义的python类型，用来运行wsgi程序，含有start_response方法::
+
+    typedef struct {
+            PyObject_HEAD
+            int result;
+            request_rec \*r;
+    #if defined(MOD_WSGI_WITH_BUCKETS)
+            apr_bucket_brigade \*bb;
+    #endif
+            WSGIRequestConfig \*config;
+            InputObject \*input;
+            PyObject \*log;
+            int status;
+            const char \*status_line;
+            PyObject \*headers;
+            PyObject \*sequence;
+            int content_length_set;
+            apr_off_t content_length;
+            apr_off_t output_length;
+    } AdapterObject;
+
+    static PyTypeObject Adapter_Type;
+    ...
+    static PyMethodDef Adapter_methods[] = {
+        { "start_response", (PyCFunction)Adapter_start_response, METH_VARARGS, 0 },
+        { "write",          (PyCFunction)Adapter_write, METH_VARARGS, 0 },
+        { "file_wrapper",   (PyCFunction)Adapter_file_wrapper, METH_VARARGS, 0 },
+        { NULL, NULL}
+    };
+
+
+Adapter_xxx 系列函数，是wsgi协议的具体实现。我承认，前面说的在wsgi_build_environment中设置wsgi相关变量的说法有不对 的地方，大多数变量是在 Adapter_environ 中设置的:)
+
+Adapter_start_response  C实现的start_response
+
+
+如何获得解释器?::
+
+    static InterpreterObject *wsgi_acquire_interpreter(const char *name)
+    {
+        PyThreadState *tstate = NULL;
+        PyInterpreterState *interp = NULL;
+        InterpreterObject *handle = NULL;
+        ...
+
+        /*
+         * Check if already have interpreter instance and
+         * if not need to create one.
+         */
+
+        handle = (InterpreterObject *)PyDict_GetItemString(wsgi_interpreters,
+                                                           name);
+
+        if (!handle) {
+            // 如果没有查找到解释器，新解释器在这里被创建
+            handle = newInterpreterObject(name);
+            ...
+
+            // 存储到 wsgi_interpreters
+            PyDict_SetItemString(wsgi_interpreters, name, (PyObject *)handle);
+        }
+        else
+            Py_INCREF(handle);
+
+        interp = handle->interp;
+
+        /*
+         * Create new thread state object. We should only be
+         * getting called where no current active thread
+         * state, so no need to remember the old one. When
+         * working with the main Python interpreter always
+         * use the simplified API for GIL locking so any
+         * extension modules which use that will still work.
+         */
+        // thread 相关代码
+        ...
+
+        return handle;
+    }
+
+
+
+加载app代码在wsgi_load_source函数::
+
+    static PyObject *wsgi_load_source(apr_pool_t *pool, request_rec *r,
+                                      const char *name, int exists,
+                                      const char* filename,
+                                      const char *process_group,
+                                      const char *application_group)
+    {
+        ...
+
+        fp = fopen(filename, "r");
+
+        n = PyParser_SimpleParseFile(fp, filename, Py_file_input);
+        ...
+
+        co = (PyObject *)PyNode_Compile(n, filename);
+        PyNode_Free(n);
+
+        // 根据文件名字name，编译过的代码co，加载该模块
+        if (co)
+            m = PyImport_ExecCodeModuleEx((char *)name, co, (char *)filename);
+
+        Py_XDECREF(co);
+
+        if (m) {
+            ...
+            // 设置模块修改时间
+            PyModule_AddObject(m, "__mtime__", object);
+        }
+        else {
+            Py_BEGIN_ALLOW_THREADS
+            if (r) {
+                ap_log_rerror(APLOG_MARK, WSGI_LOG_ERR(0), r,
+                              "mod_wsgi (pid=%d): Target WSGI script '%s' cannot "
+                              "be loaded as Python module.", getpid(), filename);
+            }
+            ...
+            wsgi_log_python_error(r, NULL, filename);
+        }
+
+        return m;
+    }
+
+
+以上即是WSGIScriptAlias模式下，一个请求收到之后，apache调用wsgi_hook_handler,
+mod_wsgi的大致处理流程。还有一个问题，python环境到底是在什么时候初始化的呢？
+让我们回头看。
+
+
+wsgi_hook_init mod_wsgi.c +13031::
+
+    static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
+                              apr_pool_t *plog, server_rec *s)
+    {
+
+        ...
+
+        /* Retain reference to base server. */
+
+        wsgi_server = s;
+
+        /* Retain record of parent process ID. */
+
+        wsgi_parent_pid = getpid();
+
+        /* Determine whether multiprocess and/or multithread. */
+
+        ap_mpm_query(AP_MPMQ_IS_THREADED, &wsgi_multithread);
+        wsgi_multithread = (wsgi_multithread != AP_MPMQ_NOT_SUPPORTED);
+
+        ap_mpm_query(AP_MPMQ_IS_FORKED, &wsgi_multiprocess);
+        if (wsgi_multiprocess != AP_MPMQ_NOT_SUPPORTED) {
+            ap_mpm_query(AP_MPMQ_MAX_DAEMONS, &wsgi_multiprocess);
+            wsgi_multiprocess = (wsgi_multiprocess != 1);
+        }
+
+        /* Retain reference to main server config. */
+
+        wsgi_server_config = ap_get_module_config(s->module_config, &wsgi_module);
+
+        /*
+         * Check that the version of Python found at
+         * runtime is what was used at compilation.
+         */
+
+        wsgi_python_version();
+
+        /*
+         * Initialise Python if required to be done in
+         * the parent process. Note that it will not be
+         * initialised if mod_python loaded and it has
+         * already been done.
+         */
+
+        if (wsgi_python_required == -1)
+            wsgi_python_required = 1;
+
+        // 在哪里初始化python，取决于 wsgi_python_after_fork 即 WSGILazyInitialization 选项
+        // 是在apache进程fork之前，还是之后？
+        if (!wsgi_python_after_fork)
+            wsgi_python_init(pconf);
+
+        /* Startup separate named daemon processes. */
+
+        // WSGIDaemonProcess 模式下启动daemon进程，要探索daemon模式的奥秘，这里即是入口
+    #if defined(MOD_WSGI_WITH_DAEMONS)
+        status = wsgi_start_daemons(pconf);
+    #endif
+
+        return status;
+    }
+
+
+fork 之后的初始化函数::
+
+    static void wsgi_hook_child_init(apr_pool_t *p, server_rec *s)
+    {
+        ...
+
+        // wsgi_python_required 取决于 WSGIRestrictEmbedded 选项
+        if (wsgi_python_required) {
+            /*
+             * Initialise Python if required to be done in
+             * the child process. Note that it will not be
+             * initialised if mod_python loaded and it has
+             * already been done.
+             */
+
+            if (wsgi_python_after_fork)
+                wsgi_python_init(p);
+
+            /*
+             * Now perform additional initialisation steps
+             * always done in child process.
+             */
+
+            wsgi_python_child_init(p);
+        }
+    }
+
+
+这两个只是和apache相关的，由apache调用的hook初始化，真正的python初始化在
+wsgi_python_init, wsgi_python_child_init 两步初始化::
+
+
+    static void wsgi_python_init(apr_pool_t *p)
+    {
+
+        static int initialized = 1;
+
+
+        /* Perform initialisation if required. */
+
+        if (!Py_IsInitialized() || !initialized) {
+            ...
+
+
+            /* Initialise Python. */
+
+            ap_log_error(APLOG_MARK, WSGI_LOG_INFO(0), wsgi_server,
+                         "mod_wsgi (pid=%d): Initializing Python.", getpid());
+
+            initialized = 1;
+
+            Py_Initialize(); // 神秘而又强大的 Py_Initialize
+
+            /* Initialise threading. */
+
+            PyEval_InitThreads();
+    #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 2
+            /*
+         * We now want to release the GIL. Before we do that
+         * though we remember what the current thread state is.
+         * We will use that later to restore the main thread
+         * state when we want to cleanup interpreters on
+         * shutdown.
+             */
+
+            wsgi_main_tstate = PyThreadState_Get();
+            PyEval_ReleaseThread(wsgi_main_tstate);
+    #else
+            PyThreadState_Swap(NULL);
+            PyEval_ReleaseLock();
+    #endif
+
+            wsgi_python_initialized = 1;
+
+            /*
+             * Register cleanups to be performed on parent restart
+             * or shutdown. This will destroy Python itself.
+             */
+
+            apr_pool_cleanup_register(p, NULL, wsgi_python_parent_cleanup,
+                                      apr_pool_cleanup_null);
+
+        }
+    }
+
+
+    static void wsgi_python_child_init(apr_pool_t *p)
+    {
+
+        // 第二步初始化所做的工作, 此时已经fork了
+
+        /*
+         * Trigger any special Python stuff required after a fork.
+         * Only do this though if we were responsible for the
+         * initialisation of the Python interpreter in the first
+         * place to avoid it being done multiple times. Also only
+         * do it if Python was initialised in parent process.
+         */
+
+        /* Finalise any Python objects required by child process. */
+
+        /* Initialise Python interpreter instance table and lock. */
+
+        // 存放所有解释器的字典
+        wsgi_interpreters = PyDict_New();
+
+        /*
+         * Initialise the key for data related to a thread. At
+         * the moment we only record an integer thread ID to be
+         * used in lookup table to thread states associated with
+         * an interprter.
+         */
+
+        /*
+         * Cache a reference to the first Python interpreter
+         * instance. This interpreter is special as some third party
+         * Python modules will only work when used from within this
+         * interpreter. This is generally when they use the Python
+         * simplified GIL API or otherwise don't use threading API
+         * properly. An empty string for name is used to identify
+         * the first Python interpreter instance.
+         */
+
+        /* Loop through import scripts for this process and load them. */
+
+        // 处理wsgi_import_list
+        if (wsgi_import_list) {
+            ...
+        }
+    }
+
+ha, 终于快完了，现在，让我们打印一些有趣的输出，来看一看这些函数在什么时间，
+哪个进程被调用。注意，下面的patch针对没有使用过 unifdef 的代码::
+
+    diff --git a/mod_wsgi.c b/mod_wsgi.c
+    index f0764b8..1781f7b 100644
+    --- a/mod_wsgi.c
+    +++ b/mod_wsgi.c
+    @@ -29,6 +29,8 @@
+      *
+      */
+     
+    +#define INFO(fmt, args...) ap_log_error(APLOG_MARK, WSGI_LOG_ERR(0), wsgi_server, "[pid %d] %s:%s:%d "fmt, getpid(),__FILE__, __PRETTY_FUNCTION__, __LINE__,args)
+    +
+     #define CORE_PRIVATE 1
+     
+     #include "httpd.h"
+    @@ -5722,10 +5724,14 @@ static void wsgi_python_init(apr_pool_t *p)
+         static int initialized = 1;
+     #endif
+     
+    +    INFO("%s", "enter");
+    +
+         /* Perform initialisation if required. */
+     
+         if (!Py_IsInitialized() || !initialized) {
+     
+    +        INFO("%s", "init python");
+    +
+             /* Enable Python 3.0 migration warnings. */
+     
+     #if PY_MAJOR_VERSION == 2 && PY_MINOR_VERSION >= 6
+    @@ -5859,6 +5865,8 @@ static PyObject *wsgi_interpreters = NULL;
+     
+     static InterpreterObject *wsgi_acquire_interpreter(const char *name)
+     {
+    +    INFO("search interpreter %s", name);
+    +
+         PyThreadState *tstate = NULL;
+         PyInterpreterState *interp = NULL;
+         InterpreterObject *handle = NULL;
+    @@ -5893,6 +5901,9 @@ static InterpreterObject *wsgi_acquire_interpreter(const char *name)
+                                                            name);
+     
+         if (!handle) {
+    +
+    +        INFO("create interpreter %s", name);
+    +
+             handle = newInterpreterObject(name);
+     
+             if (!handle) {
+    @@ -5916,6 +5927,8 @@ static InterpreterObject *wsgi_acquire_interpreter(const char *name)
+         else
+             Py_INCREF(handle);
+     
+    +    INFO("found interpreter %s", name);
+    +
+         interp = handle->interp;
+     
+         /*
+    @@ -6339,6 +6352,8 @@ static int wsgi_execute_script(request_rec *r)
+          * it is safe to start manipulating python objects.
+          */
+     
+    +    INFO("%s", "enter");
+    +
+         interp = wsgi_acquire_interpreter(config->application_group);
+     
+         if (!interp) {
+    @@ -6543,6 +6558,7 @@ static int wsgi_execute_script(request_rec *r)
+                     PyObject *method = NULL;
+                     PyObject *args = NULL;
+     
+    +                INFO("%s", "app running");
+                     Py_INCREF(object);
+                     status = Adapter_run(adapter, object);
+                     Py_DECREF(object);
+    @@ -6693,6 +6709,8 @@ static void wsgi_python_child_init(apr_pool_t *p)
+         int thread_id = 0;
+         int *thread_handle = NULL;
+     
+    +    INFO("%s", "init python further");
+    +
+         /* Working with Python, so must acquire GIL. */
+     
+         state = PyGILState_Ensure();
+    @@ -6778,6 +6796,9 @@ static void wsgi_python_child_init(apr_pool_t *p)
+         /* Loop through import scripts for this process and load them. */
+     
+         if (wsgi_import_list) {
+    +
+    +        INFO("%s", "dealing with wsgi_import_list");
+    +
+             apr_array_header_t *scripts = NULL;
+     
+             WSGIScriptFile *entries;
+    @@ -8115,6 +8136,7 @@ static void wsgi_log_script_error(request_rec *r, const char *e, const char *n)
+     
+     static void wsgi_build_environment(request_rec *r)
+     {
+    +    INFO("%s", "enter");
+         WSGIRequestConfig *config = NULL;
+     
+         const char *value = NULL;
+    @@ -8862,6 +8884,7 @@ static int wsgi_hook_handler(request_rec *r)
+         if (!r->handler)
+             return DECLINED;
+     
+    +    INFO("handler %s, file %s", r->handler, r->filename);
+         /*
+          * Construct request configuration and cache it in the
+          * request object against this module so can access it later
+    @@ -9082,6 +9105,7 @@ static int wsgi_hook_handler(request_rec *r)
+     
+     #if AP_SERVER_MAJORVERSION_NUMBER < 2
+     
+    +
+     /*
+      * Apache 1.3 module initialisation functions.
+      */
+    @@ -12909,6 +12933,9 @@ static int wsgi_hook_daemon_handler(conn_rec *c)
+     static int wsgi_hook_init(apr_pool_t *pconf, apr_pool_t *ptemp,
+                               apr_pool_t *plog, server_rec *s)
+     {
+    +
+    +    INFO("%s", "enter");
+    +
+         void *data = NULL;
+         const char *userdata_key = "wsgi_init";
+         char package[128];
+    @@ -13028,6 +13055,8 @@ static void wsgi_hook_child_init(apr_pool_t *p, server_rec *s)
+         }
+     #endif
+     
+    +    INFO("%s", "enter");
+    +
+         if (wsgi_python_required) {
+             /*
+              * Initialise Python if required to be done in
+    @@ -13500,6 +13529,7 @@ static authn_status wsgi_check_password(request_rec *r, const char *user,
+          * the last time it was accessed.
+          */
+     
+    +    /* FIXME: Reloading */
+         if (module && config->script_reloading) {
+             if (wsgi_reload_required(r->pool, r, script, module, NULL)) {
+                 /*
+    @@ -14804,6 +14834,9 @@ static int wsgi_hook_logio(apr_pool_t *pconf, apr_pool_t *ptemp,
+     
+     static void wsgi_register_hooks(apr_pool_t *p)
+     {
+    +
+    +    INFO("%s", "enter");
+    +
+         static const char * const p1[] = { "mod_alias.c", NULL };
+         static const char * const n1[]= { "mod_userdir.c",
+                                           "mod_vhost_alias.c", NULL };
+
+
+日志输出，对应于上面给出的apache配置文件::
+
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21372] mod_wsgi.c:wsgi_hook_init:12937 enter
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21372] mod_wsgi.c:wsgi_register_hooks:14838 enter
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21373] mod_wsgi.c:wsgi_hook_init:12937 enter
+    [Fri Sep 30 14:22:20 2011] [notice] Apache/2.2.17 (Ubuntu) mod_wsgi/3.3 Python/2.7.1+ configured -- resuming normal operations
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21377] mod_wsgi.c:wsgi_hook_child_init:13058 enter
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21377] mod_wsgi.c:wsgi_python_init:5727 enter
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21377] mod_wsgi.c:wsgi_python_init:5733 init python
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21378] mod_wsgi.c:wsgi_hook_child_init:13058 enter
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21378] mod_wsgi.c:wsgi_python_init:5727 enter
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21378] mod_wsgi.c:wsgi_python_init:5733 init python
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21377] mod_wsgi.c:wsgi_python_child_init:6712 init python further
+    [Fri Sep 30 14:22:20 2011] [error] [pid 21378] mod_wsgi.c:wsgi_python_child_init:6712 init python further
+
+    jaime@westeros:/var/www$ ps aux | grep apache2
+    jaime    20827  0.0  0.0   3928   508 pts/2    S+   14:17   0:00 tail -f /var/log/apache2/error.log
+    root     21373  0.0  0.1  10224  3036 ?        Ss   14:22   0:00 /usr/sbin/apache2 -k start
+    www-data 21377  0.0  0.3 234368  6752 ?        Sl   14:22   0:00 /usr/sbin/apache2 -k start
+    www-data 21378  0.0  0.3 234392  6500 ?        Sl   14:22   0:00 /usr/sbin/apache2 -k start
+    jaime    23119  0.0  0.0   4156   856 pts/3    S+   16:37   0:00 grep --color=auto apache2
+
+启动apache之后，在主进程21372中，执行wsgi_hook_init, wsgi_register_hooks，
+其中wsgi_hook_init 在另一个进程中21373中也被执行了。 
+创建了两个子进程21377, 21378。每个进程都按顺序执行wsgi_hook_child_init,
+wsgi_python_init, wsgi_python_child_init。
+此时，apache已经启动完成，python也已经初始化，但是解释器还没有创建。
+
+
+第一次请求，由进程21377负责处理，创建了解释器，也加载了hello.wsgi::
+
+    [Fri Sep 30 14:22:29 2011] [error] [pid 21377] mod_wsgi.c:wsgi_hook_handler:8887 handler wsgi-script, file /var/www/hello.wsgi
+    [Fri Sep 30 14:22:29 2011] [error] [pid 21377] mod_wsgi.c:wsgi_build_environment:8139 enter
+    [Fri Sep 30 14:22:29 2011] [error] [pid 21377] mod_wsgi.c:wsgi_execute_script:6355 enter
+    [Fri Sep 30 14:22:29 2011] [error] [pid 21377] mod_wsgi.c:wsgi_acquire_interpreter:5868 search interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:22:29 2011] [error] [pid 21377] mod_wsgi.c:wsgi_acquire_interpreter:5905 create interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:22:29 2011] [error] [pid 21377] mod_wsgi.c:wsgi_acquire_interpreter:5930 found interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:22:29 2011] [info] [client 127.0.0.1] mod_wsgi (pid=21377, process='', application='127.0.1.1|/hello'): Loading WSGI script '/var/www/hello.wsgi'.
+    [Fri Sep 30 14:22:29 2011] [error] [pid 21377] mod_wsgi.c:wsgi_execute_script:6561 app running
+    [Fri Sep 30 14:22:29 2011] [error] [pid 21377] mod_wsgi.c:wsgi_hook_handler:8887 handler image/x-icon, file /var/www/favicon.ico
+    [Fri Sep 30 14:22:29 2011] [error] [client 127.0.0.1] File does not exist: /var/www/favicon.ico
+
+第二次请求，什么也不需要做，解释器使用原来的，代码也已经加载过了，cool::
+
+    [Fri Sep 30 14:22:36 2011] [error] [pid 21377] mod_wsgi.c:wsgi_hook_handler:8887 handler wsgi-script, file /var/www/hello.wsgi
+    [Fri Sep 30 14:22:36 2011] [error] [pid 21377] mod_wsgi.c:wsgi_build_environment:8139 enter
+    [Fri Sep 30 14:22:36 2011] [error] [pid 21377] mod_wsgi.c:wsgi_execute_script:6355 enter
+    [Fri Sep 30 14:22:36 2011] [error] [pid 21377] mod_wsgi.c:wsgi_acquire_interpreter:5868 search interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:22:36 2011] [error] [pid 21377] mod_wsgi.c:wsgi_acquire_interpreter:5930 found interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:22:36 2011] [error] [pid 21377] mod_wsgi.c:wsgi_execute_script:6561 app running
+    [Fri Sep 30 14:22:36 2011] [error] [pid 21377] mod_wsgi.c:wsgi_hook_handler:8887 handler image/x-icon, file /var/www/favicon.ico
+    [Fri Sep 30 14:22:36 2011] [error] [client 127.0.0.1] File does not exist: /var/www/favicon.ico
+
+
+第三次请求，修改了hello.wsgi，所以需要重新加载代码, reloading::
+
+    [Fri Sep 30 14:22:47 2011] [error] [pid 21377] mod_wsgi.c:wsgi_hook_handler:8887 handler wsgi-script, file /var/www/hello.wsgi
+    [Fri Sep 30 14:22:47 2011] [error] [pid 21377] mod_wsgi.c:wsgi_build_environment:8139 enter
+    [Fri Sep 30 14:22:47 2011] [error] [pid 21377] mod_wsgi.c:wsgi_execute_script:6355 enter
+    [Fri Sep 30 14:22:47 2011] [error] [pid 21377] mod_wsgi.c:wsgi_acquire_interpreter:5868 search interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:22:47 2011] [error] [pid 21377] mod_wsgi.c:wsgi_acquire_interpreter:5930 found interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:22:47 2011] [info] [client 127.0.0.1] mod_wsgi (pid=21377, process='', application='127.0.1.1|/hello'): Reloading WSGI script '/var/www/hello.wsgi'.
+    [Fri Sep 30 14:22:47 2011] [error] [pid 21377] mod_wsgi.c:wsgi_execute_script:6561 app running
+    [Fri Sep 30 14:22:47 2011] [error] [pid 21377] mod_wsgi.c:wsgi_hook_handler:8887 handler image/x-icon, file /var/www/favicon.ico
+    [Fri Sep 30 14:22:47 2011] [error] [client 127.0.0.1] File does not exist: /var/www/favicon.ico
+
+虽然前三次请求都由21372执行，但我们确实观测到了21378::
+
+    [Fri Sep 30 14:41:37 2011] [error] [pid 21378] mod_wsgi.c:wsgi_hook_handler:8887 handler wsgi-script, file /var/www/hello.wsgi
+    [Fri Sep 30 14:41:37 2011] [error] [pid 21378] mod_wsgi.c:wsgi_build_environment:8139 enter
+    [Fri Sep 30 14:41:37 2011] [error] [pid 21378] mod_wsgi.c:wsgi_execute_script:6355 enter
+    [Fri Sep 30 14:41:37 2011] [error] [pid 21378] mod_wsgi.c:wsgi_acquire_interpreter:5868 search interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:41:37 2011] [error] [pid 21378] mod_wsgi.c:wsgi_acquire_interpreter:5905 create interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:41:37 2011] [error] [pid 21378] mod_wsgi.c:wsgi_acquire_interpreter:5930 found interpreter 127.0.1.1|/hello
+    [Fri Sep 30 14:41:37 2011] [info] [client 127.0.0.1] mod_wsgi (pid=21378, process='', application='127.0.1.1|/hello'): Loading WSGI script '/var/www/hello.wsgi'.
+    [Fri Sep 30 14:41:37 2011] [error] [pid 21378] mod_wsgi.c:wsgi_execute_script:6561 app running
+    [Fri Sep 30 14:41:37 2011] [error] [pid 21378] mod_wsgi.c:wsgi_hook_handler:8887 handler image/x-icon, file /var/www/favicon.ico
+    [Fri Sep 30 14:41:37 2011] [error] [client 127.0.0.1] File does not exist: /var/www/favicon.ico
+
+Notes: 
+
+- Python c api代码和apache c代码混在一起，其实只不过是对不同lib的变量进行操作罢了，
+  实际上都是c代码。当把libpython，libapache链接到本进程时，它们有各自的变量在全局空间里,
+  保存着自己的状态，其他的代码就是对这些变量的操作。 
+  这部分解释了为什么mod_python, mod_wsgi会冲突，因为他们都链接了同一个库libpython，
+  如果协调 不善，则极易出问题。 http://code.google.com/p/modwsgi/wiki/InstallationIssues#Incompatible_ModPython_Versions
+
+- WSGIDaemonProcess todo
+
