@@ -14,8 +14,8 @@ mod_wsgi： apache服务器的一个扩展模块, wsgi协议在apache服务器�
 总的来说，WSGIScriptAlias 模式，python解释器被嵌入到apache进程当中，请求处理代码是在apache的
 worker子进程中执行。WSGIDaemonProcess python解释器运行在单独的进程之中，和apache进程是隔离的。
 
-在WSGIScriptAlias 模式下，mod_wsgi怎么完成初始化？一个简单http请求，处理流程是什么？
-下文试进行简要分析。
+mod_wsgi怎么完成python初始化？和apache关系怎样？一个简单的http请求进来之后，
+处理流程大概是什么？下面将针对 WSGIScriptAlias 模式进行简要分析。
 
 apache配置::
 
