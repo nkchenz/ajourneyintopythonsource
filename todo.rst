@@ -25,4 +25,4 @@ __next__
 
 Python源码动态展示
 ---------------------
-Python是一个复杂的有机体，是否可以像展示dna模型那样动态展示出来？交互式的 n dimension source code map
+Python是一个复杂的有机体，能否像展示dna模型那样动态展示出来？交互式的 n dimension source code map
