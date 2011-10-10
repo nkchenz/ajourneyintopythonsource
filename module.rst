@@ -3,48 +3,98 @@
 
 setuptools, easy_install概览和第三包的安装位置
 -----------------------------------------------
+setuptools基于标准库distutils，为python提供了一种简便的安装第三方
+程序模块的方式, easy_install命令由setuptools 包提供。
 
-如果要使用 `easy_install` 或者 `python setup.py install` 的方式安装第三方包，
-则需要安装 `python-setuptools <http://pypi.python.org/pypi/setuptools/>`_ 。
-
-::
+源码::
 
     jaime@westeros:~/Downloads/setuptools-0.6c11/setuptools$ ls
-    archive_util.py  command     dist.py       gui.exe      package_index.py
-    tests
+    archive_util.py  command     dist.py       gui.exe      package_index.py tests
     cli.exe          depends.py  extension.py  __init__.py  sandbox.py
 
-setup.py中常见的setup函数，来自于setuptools模块::
+以Flask为例::
 
-    from setuptools import setup
+    jaime@westeros:~/Downloads/Flask-0.7.2$ ls
+    artwork  build    dist  examples  Flask.egg-info  Makefile     PKG-INFO setup.cfg  tests
+    AUTHORS  CHANGES  docs  flask     LICENSE         MANIFEST.in  README setup.py
 
-setuptools/__init__.py::
+setup.py内容::
 
-    import distutils.core, setuptools.command     
+    from setuptools import Command, setup
     ...
-    setup = distutils.core.setup
 
-最终却是标准库disutils提供的，参见 Lib/distutils/core.py 。
-
-setuptools需要python-devel包，否则会报错：
-
-    error: invalid Python installation: unable to open /usr/lib/python2.6/config/Makefile (No such file or directory)
-
-python-devel 里面到底有什么呢？请看 http://packages.debian.org/wheezy/i386/python2.6-dev/filelist 。
-
-如果当前python是未经安装的，仍在源码目录中的，为什么setuptools不把包安装到Lib/site-packages呢？仍然是正确安装到prefix目录。 setuptools是怎么决定要安装到哪个目录呢？可能在setuptools/command/easy_install.py::
-
-    INSTALL_SCHEMES = dict(
-        posix = dict(
-            install_dir = '$base/lib/python$py_version_short/site-packages',
-            script_dir  = '$base/bin',
-        ),
+    setup(
+        name='Flask',
+        version='0.7.2',
+        url='http://github.com/mitsuhiko/flask/',
+        license='BSD',
+        author='Armin Ronacher',
+        author_email='armin.ronacher@active-4.com',
+        description='A microframework based on Werkzeug, Jinja2 '
+                    'and good intentions',
+        long_description=__doc__,
+        packages=['flask'],
+        zip_safe=False,
+        platforms='any',
+        install_requires=[
+            'Werkzeug>=0.6.1',
+            'Jinja2>=2.4'
+        ],
+        classifiers=[
+        ...
+        ],
+        cmdclass={'audit': run_audit},
+        test_suite='__main__.run_tests'
     )
 
+可见setup函数来自于setuptools模块，setuptools/__init__.py 代码::
 
-distutils的setup::
+    """Extensions to the 'distutils' for large or complex distributions"""
+    from setuptools.extension import Extension, Library
 
-    def setup(**attrs):
+    # import Distribution, 实际上在setuptools/dist.py里已经做了一些monkey-patch的替换工作了
+    from setuptools.dist import Distribution, Feature, _get_unpatched
+    import distutils.core, setuptools.command
+    from setuptools.depends import Require
+    from distutils.core import Command as _Command
+    from distutils.util import convert_path
+    import os.path
+
+    __version__ = '0.6c11'
+    __all__ = [
+        'setup', 'Distribution', 'Feature', 'Command', 'Extension', 'Require',
+        'find_packages'
+    ]
+
+    bootstrap_install_from = None
+
+    def find_packages(where='.', exclude=()):
+        """Return a list all Python packages found within directory 'where'
+        ...
+
+    # setup函数实际上来自于distutils标准库
+    setup = distutils.core.setup 
+        
+    _Command = _get_unpatched(_Command)
+
+    class Command(_Command):
+        ...
+
+    import distutils.core
+    distutils.core.Command = Command    # we can't patch distutils.cmd, alas
+
+    def findall(dir = os.curdir):
+        """Find all files under 'dir' and return the list of full filenames
+        ...
+
+    import distutils.filelist
+    distutils.filelist.findall = findall    # fix findall bug in distutils.
+
+
+distutils/core.py, setup是 distutils 模块的总入口，它创建一个 Distribution
+实例，解析配置参数，然后运行具体的命令::
+
+    def setup (**attrs):
         """The gateway to the Distutils: do everything your setup script needs
         to do, in a highly flexible and user-driven way.  Briefly: create a
         Distribution instance; find and parse config files; parse the command
@@ -57,24 +107,8 @@ distutils的setup::
         supplied, then the Distribution class (in dist.py) is instantiated.
         All other arguments to 'setup' (except for 'cmdclass') are used to set
         attributes of the Distribution instance.
+        ...
 
-        The 'cmdclass' argument, if supplied, is a dictionary mapping command
-        names to command classes.  Each command encountered on the command line
-        will be turned into a command class, which is in turn instantiated; any
-        class found in 'cmdclass' is used in place of the default, which is
-        (for command 'foo_bar') class 'foo_bar' in module
-        'distutils.command.foo_bar'.  The command class must provide a
-        'user_options' attribute which is a list of option specifiers for
-        'distutils.fancy_getopt'.  Any command-line options between the current
-        and the next command are used to set attributes of the current command
-        object.
-
-        When the entire command-line has been successfully parsed, calls the
-        'run()' method on each command object in turn.  This method will be
-        driven entirely by the Distribution object (which each command object
-        has a reference to, thanks to its constructor), and the
-        command-specific options that became attributes of each command
-        object.
         """
 
         global _setup_stop_after, _setup_distribution
@@ -85,12 +119,10 @@ distutils的setup::
         if klass:
             del attrs['distclass']
         else:
+            # 默认情况下，走这里，注意，这里的Distribution已经是被setuptools打过补丁的了, 
+            # 代码后续奉上
             klass = Distribution
-
-        if 'script_name' not in attrs:
-            attrs['script_name'] = os.path.basename(sys.argv[0]) # setup.py
-        if 'script_args' not in attrs:
-            attrs['script_args'] = sys.argv[1:]
+        ...
 
         # Create the Distribution instance, using the remaining arguments
         # (ie. everything except distclass) to initialize it
@@ -102,35 +134,20 @@ distutils的setup::
                       (attrs['name'], msg)
             else:
                 raise SystemExit, "error in setup command: %s" % msg
-
-        if _setup_stop_after == "init":   # 用来标识setup的不同阶段
-            return dist
+        ...
 
         # Find and parse the config file(s): they will override options from
         # the setup script, but be overridden by the command line.
-        dist.parse_config_files() # 读取setup.cfg配置文件
+        dist.parse_config_files()
+        ...
 
-        if DEBUG:
-            print "options (after parsing config files):"
-            dist.dump_option_dicts()
-
-        if _setup_stop_after == "config":
-            return dist
-
-        # Parse the command line and override config files; any
-        # command-line errors are the end user's fault, so turn them into
-        # SystemExit to suppress tracebacks.
+        # Parse the command line; any command-line errors are the end user's
+        # fault, so turn them into SystemExit to suppress tracebacks.
         try:
             ok = dist.parse_command_line()
         except DistutilsArgError, msg:
             raise SystemExit, gen_usage(dist.script_name) + "\nerror: %s" % msg
-
-        if DEBUG:
-            print "options (after parsing command line):"
-            dist.dump_option_dicts()
-
-        if _setup_stop_after == "commandline":
-            return dist
+        ...
 
         # And finally, run all the commands found on the command line.
         if ok:
@@ -138,121 +155,33 @@ distutils的setup::
                 dist.run_commands()
             except KeyboardInterrupt:
                 raise SystemExit, "interrupted"
-            except (IOError, os.error), exc:
-                error = grok_environment_error(exc)
-
-                if DEBUG:
-                    sys.stderr.write(error + "\n")
-                    raise
-                else:
-                    raise SystemExit, error
-
-            except (DistutilsError,
-                    CCompilerError), msg:
-                if DEBUG:
-                    raise
-                else:
-                    raise SystemExit, "error: " + str(msg)
+            ...
 
         return dist
 
+setuptools/dist.py::
 
-dist.py
-parse_command_line 调用 _parse_command_opts，找到command对应的class::
+    from distutils.core import Distribution as _Distribution
+    ...
 
+    _Distribution = _get_unpatched(_Distribution)
 
-  def _parse_command_opts(self, parser, args):
-        """Parse the command-line options for a single command.
-        'parser' must be a FancyGetopt instance; 'args' must be the list
-        of arguments, starting with the current command (whose options
-        we are about to parse).  Returns a new version of 'args' with
-        the next command at the front of the list; will be the empty
-        list if there are no more commands on the command line.  Returns
-        None if the user asked for help on this command.
-        """
-        # late import because of mutual dependence between these modules
-        from distutils.cmd import Command
+    class Distribution(_Distribution):
+        """Distribution with support for features, tests, and package data
 
-        # Pull the current command from the head of the command line
-        command = args[0]
-        if not command_re.match(command):
-            raise SystemExit, "invalid command name '%s'" % command
-        self.commands.append(command)
+        This is an enhanced version of 'distutils.dist.Distribution' that
+        effectively adds the following new optional keyword arguments to 'setup()':
+        ...
 
-        # Dig up the command class that implements this command, so we
-        # 1) know that it's a valid command, and 2) know which options
-        # it takes.
-        try:
-            cmd_class = self.get_command_class(command)
-        except DistutilsModuleError, msg:
-            raise DistutilsArgError, msg
+    # 替换 Distribution 的地方
+    # Install it throughout the distutils
+    for module in distutils.dist, distutils.core, distutils.cmd:
+        module.Distribution = Distribution
 
-        # Require that the command class be derived from Command -- want
-        # to be sure that the basic "command" interface is implemented.
-        if not issubclass(cmd_class, Command):
-            raise DistutilsClassError, \
-                  "command class %s must subclass Command" % cmd_class
+既然dist已经是setuptools.dist.Distribution的一个实例，跟踪代码的时候需要分清
+函数到底是在什么地方定义，distutils还是setuptools.
 
-        # Also make sure that the command object provides a list of its
-        # known options.
-        if not (hasattr(cmd_class, 'user_options') and
-                isinstance(cmd_class.user_options, list)):
-            raise DistutilsClassError, \
-                  ("command class %s must provide " +
-                   "'user_options' attribute (a list of tuples)") % \
-                  cmd_class
-
-        # If the command class has a list of negative alias options,
-        # merge it in with the global negative aliases.
-        negative_opt = self.negative_opt
-        if hasattr(cmd_class, 'negative_opt'):
-            negative_opt = negative_opt.copy()
-            negative_opt.update(cmd_class.negative_opt)
-
-        # Check for help_options in command class.  They have a different
-        # format (tuple of four) so we need to preprocess them here.
-        if (hasattr(cmd_class, 'help_options') and
-            isinstance(cmd_class.help_options, list)):
-            help_options = fix_help_options(cmd_class.help_options)
-        else:
-            help_options = []
-
-
-        # All commands support the global options too, just by adding
-        # in 'global_options'.
-        parser.set_option_table(self.global_options +
-                                cmd_class.user_options +
-                                help_options)
-        parser.set_negative_aliases(negative_opt)
-        (args, opts) = parser.getopt(args[1:])
-        if hasattr(opts, 'help') and opts.help:
-            self._show_help(parser, display_options=0, commands=[cmd_class])
-            return
-
-        if (hasattr(cmd_class, 'help_options') and
-            isinstance(cmd_class.help_options, list)):
-            help_option_found=0
-            for (help_option, short, desc, func) in cmd_class.help_options:
-                if hasattr(opts, parser.get_attr_name(help_option)):
-                    help_option_found=1
-                    if hasattr(func, '__call__'):
-                        func()
-                    else:
-                        raise DistutilsClassError(
-                            "invalid help function %r for help option '%s': "
-                            "must be a callable object (function, etc.)"
-                            % (func, help_option))
-
-            if help_option_found:
-                return
-
-        # Put the options from the command-line into their official
-        # holding pen, the 'command_options' dictionary.
-        opt_dict = self.get_option_dict(command)
-        for (name, value) in vars(opts).items():
-            opt_dict[name] = ("command line", value)
-
-        return args
+dist.run_commands 继承自distutils/dist.py::
 
    def run_commands(self):
         """Run each command that was seen on the setup script command line.
@@ -262,16 +191,7 @@ parse_command_line 调用 _parse_command_opts，找到command对应的class::
         for cmd in self.commands:
             self.run_command(cmd)
 
-    # -- Methods that operate on its Commands --------------------------
-
     def run_command(self, command):
-        """Do whatever it takes to run a command (including nothing at all,
-        if the command has already been run).  Specifically: if we have
-        already created and run the command named by 'command', return
-        silently without doing anything.  If the command named by 'command'
-        doesn't even have a command object yet, create one.  Then invoke
-        'run()' on that command object (or an existing one).
-        """
         # Already been here, done that? then return silently.
         if self.have_run.get(command):
             return
@@ -282,112 +202,77 @@ parse_command_line 调用 _parse_command_opts，找到command对应的class::
         cmd_obj.run()
         self.have_run[command] = 1
 
+总之，对于python setup.py install来说，这个cmd_obj就是setuptools/command/install.py了，
+设个trace看看::
 
-get_command_obj -> get_command_class 
+    jaime@westeros:/home/ideer/Downloads/Flask-0.7.2$ diff -u /usr/local/lib/python2.6/distutils/dist.py.orig /usr/local/lib/python2.6/distutils/dist.py
+    --- /usr/local/lib/python2.6/distutils/dist.py.orig	2011-10-10 22:27:53.658046001 +0800
+    +++ /usr/local/lib/python2.6/distutils/dist.py	2011-10-10 22:28:17.350163485 +0800
+    @@ -989,6 +989,7 @@
+             if self.have_run.get(command):
+                 return
+     
+    +        import pdb; pdb.set_trace()
+             log.info("running %s", command)
+             cmd_obj = self.get_command_obj(command)
+             cmd_obj.ensure_finalized()
 
+    jaime@westeros:/home/ideer/Downloads/Flask-0.7.2$ python setup.py install
+    > /usr/local/lib/python2.6/distutils/dist.py(993)run_command()
+    -> log.info("running %s", command)
+    (Pdb) n
+    running install
+    > /usr/local/lib/python2.6/distutils/dist.py(994)run_command()
+    -> cmd_obj = self.get_command_obj(command)
+    (Pdb) 
+    (Pdb) cmd_obj.__class__
+    <class setuptools.command.install.install at 0xb7440dac>
+    (Pdb) 
 
-    def get_command_packages(self):
-        """Return a list of packages from which commands are loaded."""
-        pkgs = self.command_packages
-        if not isinstance(pkgs, list):
-            if pkgs is None:
-                pkgs = ''
-            pkgs = [pkg.strip() for pkg in pkgs.split(',') if pkg != '']
-            if "distutils.command" not in pkgs:
-                pkgs.insert(0, "distutils.command")
-            self.command_packages = pkgs
-        return pkgs
-
-    def get_command_class(self, command):
-        """Return the class that implements the Distutils command named by
-        'command'.  First we check the 'cmdclass' dictionary; if the
-        command is mentioned there, we fetch the class object from the
-        dictionary and return it.  Otherwise we load the command module
-        ("distutils.command." + command) and fetch the command class from
-        the module.  The loaded class is also stored in 'cmdclass'
-        to speed future calls to 'get_command_class()'.
-
-        Raises DistutilsModuleError if the expected module could not be
-        found, or if that module does not define the expected class.
-        """
-        klass = self.cmdclass.get(command)
-        if klass:
-            return klass
-
-        for pkgname in self.get_command_packages():
-            module_name = "%s.%s" % (pkgname, command)
-            klass_name = command
-
-            try:
-                __import__ (module_name)
-                module = sys.modules[module_name]
-            except ImportError:
-                continue
-
-            try:  # distutils.command.install.install
-                klass = getattr(module, klass_name)  # 命令模块内有一个和命令一样名字的类
-            except AttributeError:
-                raise DistutilsModuleError, \
-                      "invalid command '%s' (no class '%s' in module '%s')" \
-                      % (command, klass_name, module_name)
-
-            self.cmdclass[command] = klass
-            return klass
-
-        raise DistutilsModuleError("invalid command '%s'" % command)
-
-
-使用setuptools的Distribution替代标准的Distribution, setuptools/dist.py 675+::
-
-    675 # Install it throughout the distutils                                                                                              
-    676 for module in distutils.dist, distutils.core, distutils.cmd:
-    677     module.Distribution = Distribution
-
-setuptools/__init__.py::
-
-    from setuptools.dist import Distribution, Feature, _get_unpatched
 
 setuptools/command/install.py::
 
-    def run(self):
-        ...
-        if caller_module != 'distutils.dist' or caller_name!='run_commands':
-            # We weren't called from the command line or setup(), so we
-            # should run in backward-compatibility mode to support bdist_*
-            # commands.
-            _install.run(self)
-        else:
-            self.do_egg_install()
+        def run(self):
+            ...
+            if caller_module != 'distutils.dist' or caller_name!='run_commands':
+                # We weren't called from the command line or setup(), so we
+                # should run in backward-compatibility mode to support bdist_*
+                # commands.
+                _install.run(self)
+            else:
+                self.do_egg_install()
 
-    def do_egg_install(self):
+        def do_egg_install(self):
 
-        easy_install = self.distribution.get_command_class('easy_install')
+            easy_install = self.distribution.get_command_class('easy_install')
 
-        cmd = easy_install(
-            self.distribution, args="x", root=self.root, record=self.record,
-        )
-        cmd.ensure_finalized()  # finalize before bdist_egg munges install cmd
-        cmd.always_copy_from = '.'  # make sure local-dir eggs get installed
+            cmd = easy_install(
+                self.distribution, args="x", root=self.root, record=self.record,
+            )
+            # 注意这里，将决定安装位置的地方，后续详述
+            cmd.ensure_finalized()  # finalize before bdist_egg munges install cmd
+            cmd.always_copy_from = '.'  # make sure local-dir eggs get installed
 
-        # pick up setup-dir .egg files only: no .egg-info
-        cmd.package_index.scan(glob.glob('*.egg'))
+            # pick up setup-dir .egg files only: no .egg-info
+            cmd.package_index.scan(glob.glob('*.egg'))
 
-        self.run_command('bdist_egg')
-        args = [self.distribution.get_command_obj('bdist_egg').egg_output]
+            self.run_command('bdist_egg')
+            args = [self.distribution.get_command_obj('bdist_egg').egg_output]
 
-        if setuptools.bootstrap_install_from:
-            # Bootstrap self-installation of setuptools
-            args.insert(0, setuptools.bootstrap_install_from)
+            if setuptools.bootstrap_install_from:
+                # Bootstrap self-installation of setuptools
+                args.insert(0, setuptools.bootstrap_install_from)
 
-        cmd.args = args
-        cmd.run()
-        setuptools.bootstrap_install_from = None
+            # 跳转到setuptools/command/easy_install.py的run
+            cmd.args = args
+            cmd.run()
+            setuptools.bootstrap_install_from = None
 
 bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文件，编译，直到生成egg压缩包
-为止，代码在setuptools/command/bdist_egg.py，编译c扩展的命令 build_clib
-在标准库distutils模块中完成，Lib/distutils/command/build_clib.py。
+为止，代码在setuptools/command/bdist_egg.py，编译c扩展的命令 build_clib 在distutils中完成，
+distutils/command/build_clib.py。
 
-有了egg文件之后，进入easy_install命令，setuptools/command/easy_install.py::
+有了egg文件之后，setuptools/command/easy_install.py::
 
     def run(self):
         if self.verbose!=self.distribution.verbose:
@@ -404,24 +289,25 @@ bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文�
         download = None
         if not self.editable: self.install_site_py()
 
+        # 根据spec的不同，有三种情况需要处理
         try:
             if not isinstance(spec,Requirement):
                 if URL_SCHEME(spec):
-                    # 需要下载的包
+                    # 1. 需要下载的包
                     # It's a url, download it to tmpdir and process
                     self.not_editable(spec)
                     download = self.package_index.download(spec, tmpdir)
                     return self.install_item(None, download, tmpdir, deps, True)
 
                 elif os.path.exists(spec):
-                    # 本地的包
+                    # 2. 本地的包
                     # Existing file or directory, just process it directly
                     self.not_editable(spec)
                     return self.install_item(None, spec, tmpdir, deps, True)
                 else:
                     spec = parse_requirement_arg(spec)
 
-            # 查找某个依赖的包
+            # 3. 查找某个依赖的包
             # spec 是 Requirement
             self.check_editable(spec)
             dist = self.package_index.fetch_distribution(
@@ -469,9 +355,10 @@ bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文�
         log.info("Processing %s", os.path.basename(download))
 
         if install_needed:
-            # 安装
             dists = self.install_eggs(spec, download, tmpdir)
-            # 善后工作，依次处理该egg文件的依赖关系
+            # install_eggs返回成功安装后的包信息, 参见self.egg_distribution 
+            # 一般是只有一个元素的list，但可能一次安装了多个包，
+            ＃所以下面的for，遍历处理所有成功安装的包依赖关系
             for dist in dists:
                 self.process_distribution(spec, dist, deps)
         else:
@@ -485,6 +372,7 @@ bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文�
 
     def process_distribution(self, requirement, dist, deps=True, *info):
         # 处理后续安装事宜
+        # requirement是spec，dist是成功安装包的信息, deps是否处理依赖关系的标志
         self.update_pth(dist)
         self.package_index.add(dist)
         self.local_index.add(dist)
@@ -512,6 +400,7 @@ bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文�
         # 注意这个marker
         log.info("Processing dependencies for %s", requirement)
         try:
+            # 获得依赖关系的安装信息
             distros = WorkingSet([]).resolve(
                 [requirement], self.local_index, self.easy_install
             )
@@ -528,9 +417,9 @@ bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文�
             # Force all the relevant distros to be copied or activated
             for dist in distros:
                 if dist.key not in self.installed_projects:
+                    # 嵌套依赖关系安装
                     # 又回到easy_install，因为依赖的包可能也依赖别的包
                     # 可能也需要从pypi下载
-                    # 嵌套依赖关系安装
                     self.easy_install(dist.as_requirement())
         # Marker
         log.info("Finished processing dependencies for %s", requirement)
@@ -540,6 +429,7 @@ bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文�
     def install_eggs(self, spec, dist_filename, tmpdir):
         # .egg dirs or files are already built, so just return them
         if dist_filename.lower().endswith('.egg'):
+            # 调用install_egg安装
             return [self.install_egg(dist_filename, tmpdir)]
         elif dist_filename.lower().endswith('.exe'):
             return [self.install_exe(dist_filename, tmpdir)]
@@ -565,6 +455,7 @@ bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文�
             return self.build_and_install(setup_script, setup_base)
 
     def install_egg(self, egg_path, tmpdir):
+        # self.install_dir 这里！
         destination = os.path.join(self.install_dir,os.path.basename(egg_path))
         destination = os.path.abspath(destination)
         if not self.dry_run:
@@ -599,141 +490,285 @@ bdist_egg 命令可谓做了整个安装过程的大部分工作，准备egg文�
         self.add_output(destination)
         return self.egg_distribution(destination)
 
-终于看到安装位置在由 self.install_dir 决定，同时此文件中，finalize_options函数，在上文的
-cmd.ensure_finalized中被调用::
+终于找到self.install_dir, 才是决定安装位置的所在。那么它又从哪里来的呢？
+
+setuptools/command/easy_install.py finalize_options函数，在上文的cmd.ensure_finalized(继承自distutils.cmd.Command)中被调用::
 
     def finalize_options(self):
-        # 如果setup.py install指定了 --prefix 参数，则在 _expand 函数中处理
+        # 如果setup.py install命令附带了--prefix 参数，则在 _expand 函数中处理
+        # 该文件中的 INSTALL_SCHEMES 即作此用，与distutils install.py中的不同
         self._expand('install_dir','script_dir','build_directory','site_dirs')
         # If a non-default installation directory was specified, default the
         # script directory to match it.
         if self.script_dir is None:
             self.script_dir = self.install_dir
-
+        
+        # 默认没有指定
         # Let install_dir get set by install_lib command, which in turn
         # gets its info from the install command, and takes into account
         # --prefix and --home and all that other crud.
         self.set_undefined_options('install_lib',
             ('install_dir','install_dir')
         )
+        # 意思是将install_lib命令的install_dir属性赋予本命令的install_dir
  
-令人费解的set_undefined_options函数, Lib/distutils/cmd.py +287::
+distutils/command/install_lib.py::
 
-    def set_undefined_options (self, src_cmd, *option_pairs):
-            """Set the values of any "undefined" options from corresponding
-            option values in some other command object.  "Undefined" here means
-            "is None", which is the convention used to indicate that an option
-            has not been changed between 'initialize_options()' and
-            'finalize_options()'.  Usually called from 'finalize_options()' for
-            options that depend on some other command rather than another
-            option of the same command.  'src_cmd' is the other command from
-            which option values will be taken (a command object will be created
-            for it if necessary); the remaining arguments are
-            '(src_option,dst_option)' tuples which mean "take the value of
-            'src_option' in the 'src_cmd' command object, and copy it to
-            'dst_option' in the current command object".
-            """
+    def finalize_options (self):
 
-            # Option_pairs: list of (src_option, dst_option) tuples
+        # Get all the information we need to install pure Python modules
+        # from the umbrella 'install' command -- build (source) directory,
+        # install (target) directory, and whether to compile .py files.
+        self.set_undefined_options('install',
+                                   ('build_lib', 'build_dir'),
+                                   ('install_lib', 'install_dir'),
+                                   ('force', 'force'),
+                                   ('compile', 'compile'),
+                                   ('optimize', 'optimize'),
+                                   ('skip_build', 'skip_build'),
+                                  )
 
-            src_cmd_obj = self.distribution.get_command_obj(src_cmd)
-            src_cmd_obj.ensure_finalized()
-            for (src_option, dst_option) in option_pairs:
-                if getattr(self, dst_option) is None:
-                    setattr(self, dst_option,
-                            getattr(src_cmd_obj, src_option))
+       # 意思是将install命令的install_lib属性赋予本命令的install_dir
 
-setuptools的install命令继承自distutils.command.install, 故最终执行的
-finalize_options来自于 Lib/distutils/command/install.py::
+令人费解的finalize_options！大意是每个命令都需要有这么一个机会，在最后时刻
+设置一些参数，easy_install从install_lib中，后者从install中得到了位置信息。
 
-    finalize_unix -> unix_prefix scheme -> purelib -> install_lib ->
-    install_dir
+目标install命令的 install_lib。       
 
-正如其注释所言，finalize_options 函数非常复杂，各种和安装目录有关的情况
-都在此处理，若要细究，可用pdb在这里设置断点跟踪::
-    
-    import pdb; pdb.set_trace()
+setuptools.command.install命令的finalize_options函数，调用了distutils.command.install.finalize_options，
 
-setup.py install 输出分析::
+distutils/command/install.py::
 
-    jaime@westeros:~/Downloads/Flask-0.7.2$ sudo python setup.py install
-    [sudo] password for jaime: 
+    INSTALL_SCHEMES = {
+        'unix_prefix': {
+            'purelib': '$base/lib/python$py_version_short/site-packages',
+            'platlib': '$platbase/lib/python$py_version_short/site-packages',
+            'headers': '$base/include/python$py_version_short/$dist_name',
+            'scripts': '$base/bin',
+            'data'   : '$base',
+            },
+        'unix_home': {
+            'purelib': '$base/lib/python',
+            'platlib': '$base/lib/python',
+            'headers': '$base/include/python/$dist_name',
+            'scripts': '$base/bin',
+            'data'   : '$base',
+            },
+            ...
+        }
+
+    def finalize_options (self):
+
+
+        # This method (and its pliant slaves, like 'finalize_unix()',
+        # 'finalize_other()', and 'select_scheme()') is where the default
+        # installation directories for modules, extension modules, and
+        # anything else we care to install from a Python module
+        # distribution.  Thus, this code makes a pretty important policy
+        # statement about how third-party stuff is added to a Python
+        # installation!  Note that the actual work of installation is done
+        # by the relatively simple 'install_*' commands; they just take
+        # their orders from the installation directory options determined
+        # here.
+
+        ...
+
+        # Now the interesting logic -- so interesting that we farm it out
+        # to other methods.  The goal of these methods is to set the final
+        # values for the install_{lib,scripts,data,...}  options, using as
+        # input a heady brew of prefix, exec_prefix, home, install_base,
+        # install_platbase, user-supplied versions of
+        # install_{purelib,platlib,lib,scripts,data,...}, and the
+        # INSTALL_SCHEME dictionary above.  Phew!
+
+        self.dump_dirs("pre-finalize_{unix,other}")
+
+        if os.name == 'posix':
+            # 神秘的选中 unix_prefix scheme
+            self.finalize_unix()
+        else:
+            self.finalize_other()
+
+        self.dump_dirs("post-finalize_{unix,other}()")
+        ...
+
+        # Pick the actual directory to install all modules to: either
+        # install_purelib or install_platlib, depending on whether this
+        # module distribution is pure or not.  Of course, if the user
+        # already specified install_lib, use their selection.
+        if self.install_lib is None:
+            if self.distribution.ext_modules: # has extensions: non-pure
+                self.install_lib = self.install_platlib
+            else:
+
+                # INSTALL_SCHEMES 里为什么是purelib？原因在这里
+                # 将purelib路径赋值给install_lib, done
+                self.install_lib = self.install_purelib 
+
+        ...
+
+    def finalize_unix (self):
+
+        if self.install_base is not None or self.install_platbase is not None:
+            ...
+            return
+
+        if self.user:
+            ...
+            self.select_scheme("unix_user")
+        elif self.home is not None:
+            self.install_base = self.install_platbase = self.home
+            self.select_scheme("unix_home")
+        else:
+            if self.prefix is None:
+                if self.exec_prefix is not None:
+                    raise DistutilsOptionError, \
+                          "must not supply exec-prefix without prefix"
+
+                self.prefix = os.path.normpath(sys.prefix)
+                self.exec_prefix = os.path.normpath(sys.exec_prefix)
+
+            else:
+                if self.exec_prefix is None:
+                    self.exec_prefix = self.prefix
+
+            self.install_base = self.prefix
+            self.install_platbase = self.exec_prefix
+            self.select_scheme("unix_prefix")
+
+finalize_unix -> unix_prefix scheme -> purelib -> install_lib -> install_dir
+
+太复杂了, 正如其注释所言，各种和安装目录有关的情况都在此处理，若要细究可在此设置断点跟踪。
+
+一些debug信息::
+
+    pre-finalize_{unix,other}:
+      prefix: None
+      exec_prefix: None
+      home: None
+      user: 0
+      install_base: None
+      install_platbase: None
+      root: None
+      install_purelib: None
+      install_platlib: None
+      install_lib: None
+      install_headers: None
+      install_scripts: None
+      install_data: None
+      ...
+    post-finalize_{unix,other}():
+      prefix: /usr/local
+      exec_prefix: /usr/local
+      home: None
+      user: 0
+      install_base: /usr/local
+      install_platbase: /usr/local
+      root: None
+      install_purelib: $base/lib/python$py_version_short/site-packages
+      install_platlib: $platbase/lib/python$py_version_short/site-packages
+      install_lib: None
+      install_headers: $base/include/python$py_version_short/$dist_name
+      install_scripts: $base/bin
+      install_data: $base
+      ...
+    after prepending root:
+      prefix: /usr/local
+      exec_prefix: /usr/local
+      home: None
+      user: 0
+      install_base: /usr/local
+      install_platbase: /usr/local
+      root: None
+      install_purelib: /usr/local/lib/python2.6/site-packages
+      install_platlib: /usr/local/lib/python2.6/site-packages
+      install_lib: /usr/local/lib/python2.6/site-packages/
+      install_headers: /usr/local/include/python2.6/Flask
+      install_scripts: /usr/local/bin
+      install_data: /usr/local
+      ...
+
+实际输出::
+
+    jaime@westeros:/home/ideer/Downloads/Flask-0.7.2$ sudo python setup.py install
     running install
-    Checking .pth file support in /usr/local/lib/python2.7/dist-packages/
-    /usr/bin/python -E -c pass
-    TEST PASSED: /usr/local/lib/python2.7/dist-packages/ appears to support .pth files
     running bdist_egg
+    # 获得EGG-INFO
     running egg_info
-    # 准备EGG-INFO 文件
     writing requirements to Flask.egg-info/requires.txt
     writing Flask.egg-info/PKG-INFO
     writing top-level names to Flask.egg-info/top_level.txt
     writing dependency_links to Flask.egg-info/dependency_links.txt
     reading manifest file 'Flask.egg-info/SOURCES.txt'
     reading manifest template 'MANIFEST.in'
-    warning: no previously-included files matching '*.pyc' found under directory 'docs'
     ...
     writing manifest file 'Flask.egg-info/SOURCES.txt'
     installing library code to build/bdist.linux-i686/egg
     running install_lib
     running build_py
-    creating build
-    creating build/lib.linux-i686-2.7
-    creating build/lib.linux-i686-2.7/flask
-    copying flask/views.py -> build/lib.linux-i686-2.7/flask
-    copying flask/helpers.py -> build/lib.linux-i686-2.7/flask
+    # 建立build目录，build/lib临时存放，最终目录为build/dist目录
+    creating build/lib
+    creating build/lib/flask
+    copying flask/views.py -> build/lib/flask
+    copying flask/helpers.py -> build/lib/flask
     ...
-    # 复制纯py文件
-    creating build/bdist.linux-i686
-    creating build/bdist.linux-i686/egg # 该目录为egg包的根目录
+    # 建立 egg 包根目录
+    creating build/bdist.linux-i686/egg
     creating build/bdist.linux-i686/egg/flask
-    copying build/lib.linux-i686-2.7/flask/views.py -> build/bdist.linux-i686/egg/flask
-    copying build/lib.linux-i686-2.7/flask/helpers.py -> build/bdist.linux-i686/egg/flask
+    # 复制纯py文件到egg目录
+    copying build/lib/flask/views.py -> build/bdist.linux-i686/egg/flask
+    copying build/lib/flask/helpers.py -> build/bdist.linux-i686/egg/flask
     ...
+    # 编译
     byte-compiling build/bdist.linux-i686/egg/flask/views.py to views.pyc
     byte-compiling build/bdist.linux-i686/egg/flask/helpers.py to helpers.pyc
     ...
-    # 复制egginfo文件到egg包的根目录
+    # 将准备好的EGG-INFO复制到egg目录
     creating build/bdist.linux-i686/egg/EGG-INFO
     copying Flask.egg-info/PKG-INFO -> build/bdist.linux-i686/egg/EGG-INFO
     copying Flask.egg-info/SOURCES.txt -> build/bdist.linux-i686/egg/EGG-INFO
     ...
-    # 生成 egg 包
-    creating 'dist/Flask-0.7.2-py2.7.egg' and adding 'build/bdist.linux-i686/egg' to it
+    # 将egg根目录压缩为egg文件，存放到dist目录
+    creating 'dist/Flask-0.7.2-py2.6.egg' and adding 'build/bdist.linux-i686/egg' to it
     removing 'build/bdist.linux-i686/egg' (and everything under it)
-    # install_item 的marker
-    Processing Flask-0.7.2-py2.7.egg
-    # 解压 egg 到系统目录
-    creating /usr/local/lib/python2.7/dist-packages/Flask-0.7.2-py2.7.egg
-    Extracting Flask-0.7.2-py2.7.egg to /usr/local/lib/python2.7/dist-packages
+    # 开始安装 Flask egg
+    Processing Flask-0.7.2-py2.6.egg
+    creating /usr/local/lib/python2.6/site-packages/Flask-0.7.2-py2.6.egg
+    # 加压本地egg
+    Extracting Flask-0.7.2-py2.6.egg to /usr/local/lib/python2.6/site-packages
     Adding Flask 0.7.2 to easy-install.pth file
 
-    Installed /usr/local/lib/python2.7/dist-packages/Flask-0.7.2-py2.7.egg
-    # process_distribution 的marker
+    Installed /usr/local/lib/python2.6/site-packages/Flask-0.7.2-py2.6.egg
+    # process_distribution 标志输出
     Processing dependencies for Flask==0.7.2
-    # 处理依赖关系，从pypi自动下载文件
+    Searching for Jinja2>=2.4
+    Reading http://pypi.python.org/simple/Jinja2/
+    Reading http://jinja.pocoo.org/
+    Best match: Jinja2 2.6
+    Downloading http://pypi.python.org/packages/source/J/Jinja2/Jinja2-2.6.tar.gz#md5=1c49a8825c993bfdcf55bb36897d28a2
+    # install_item 标志输出，开始安装jinja
+    Processing Jinja2-2.6.tar.gz
+    Running Jinja2-2.6/setup.py -q bdist_egg --dist-dir /tmp/easy_install-1wzF7P/Jinja2-2.6/egg-dist-tmp-g9b8N8
+    ...
+    Adding Jinja2 2.6 to easy-install.pth file
+
+    Installed /usr/local/lib/python2.6/site-packages/Jinja2-2.6-py2.6.egg
     Searching for Werkzeug>=0.6.1
     Reading http://pypi.python.org/simple/Werkzeug/
     Reading http://werkzeug.pocoo.org/
     Reading http://trac.pocoo.org/repos/werkzeug/trunk
     Best match: Werkzeug 0.8.1
     Downloading http://pypi.python.org/packages/source/W/Werkzeug/Werkzeug-0.8.1.tar.gz#md5=20f3a65710d64f9f455111ed71e3da66
-    # install_item 的marker
-    Processing Werkzeug-0.8.1.tar.gz 
-    Running Werkzeug-0.8.1/setup.py -q bdist_egg --dist-dir /tmp/easy_install-JtlclJ/Werkzeug-0.8.1/egg-dist-tmp-DV1nWi
+    # install_item 标志输出，开始安装werkzeug
+    Processing Werkzeug-0.8.1.tar.gz
+    Running Werkzeug-0.8.1/setup.py -q bdist_egg --dist-dir /tmp/easy_install-SUNJMn/Werkzeug-0.8.1/egg-dist-tmp-uZjjba
     ...
     Adding Werkzeug 0.8.1 to easy-install.pth file
 
-    Installed /usr/local/lib/python2.7/dist-packages/Werkzeug-0.8.1-py2.7.egg
-    Searching for Jinja2==2.5.5
-    Best match: Jinja2 2.5.5
-    Jinja2 2.5.5 is already the active version in easy-install.pth
-
-    Using /usr/lib/pymodules/python2.7
+    Installed /usr/local/lib/python2.6/site-packages/Werkzeug-0.8.1-py2.6.egg
+    # process_distribution 所有Flask依赖关系处理完毕
     Finished processing dependencies for Flask==0.7.2
-    jaime@westeros:~/Downloads/Flask-0.7.2$ 
-
-
+    jaime@westeros:/home/ideer/Downloads/Flask-0.7.2$ 
 
 
 其实不管安装工具多么复杂，最主要的有两点：
@@ -746,23 +781,19 @@ setup.py install 输出分析::
 
 安装工具提供的附加值在于package的管理，安装，卸载，版本依赖关系处理，升级更新等。
 
-
-问题: 一般运行 `python setup.py install` ，package就会被安装到python的路径。那么如果系统内
-有多个版本的python，能否修改setuptools，用 `pythonA setup.py install` 将package安装pythonB的路径？
-
-    pythonA setup.py --python pythonB --location ~/pythonB/site-packages 
-
-实际上，可以做到运行安装程序的python，和要把package安装到哪个python没有关系
-
-FIXME: 
+深入问题:
 
 * easy_install的替代品 `pip <http://pypi.python.org/pypi/pip>`_ ?
 
-* setuptools 如何安装自己，bootstrap也是一个有意思的问题。
+* setuptools的bootstrap， 如何自我安装
+
+* distutils的c扩展编译模块
 
 * 是否能将构建，编译，打包与安装分开？只是单纯的下载安装包，解决依赖关系，安装，如apt-get。
 
-
+* 一般运行 `python setup.py install` ，package就会被安装到运行的那个python。
+  如果系统内有多个版本的python，能否运行一个python，为另一个python安装包呢，即
+  用 `pythonA setup.py install` 将package安装pythonB的路径？
 
 
 site.py是什么
@@ -1515,6 +1546,8 @@ Python/builtinmodule.c +188::
 
 PyArg_ParseTuple 参见 The Python/C API。
 
+以下有待清理
+------------------------
 
 builtin的模块列表
 -------------------------------
