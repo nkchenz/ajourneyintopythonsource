@@ -1546,30 +1546,437 @@ Python/builtinmodule.c +188::
 
 PyArg_ParseTuple 参见 The Python/C API。
 
-+++++++++++++有待清理的分割线+++++++++++++++++++++
-------------------------------------------------------
+sys.path, sys.prefix, sys.exec_prefix, PYTHONHOME 和 PYTHONPATH
+------------------------------------------------------------------
+sys模块代码在 Python/sysmodule.c::
 
-builtin的模块列表
--------------------------------
-你可以在Modules/Setup.dist文件中指定将哪些模块内置到python可执行程序库中。
+    PyObject *
+    _PySys_Init(void)
+    {
+        PyObject *m, *v, *sysdict;
+        PyObject *sysin, *sysout, *syserr;
+        char *s;
+
+        m = Py_InitModule3("sys", sys_methods, sys_doc);
+        if (m == NULL)
+            return NULL;
+        sysdict = PyModule_GetDict(m);
+    #define SET_SYS_FROM_STRING(key, value)                 \
+        v = value;                                          \
+        if (v != NULL)                                      \
+            PyDict_SetItemString(sysdict, key, v);          \
+        Py_XDECREF(v)
+        ...
+
+        SET_SYS_FROM_STRING("executable",
+                    PyString_FromString(Py_GetProgramFullPath()));
+        SET_SYS_FROM_STRING("prefix",
+                    PyString_FromString(Py_GetPrefix()));
+        SET_SYS_FROM_STRING("exec_prefix",
+                    PyString_FromString(Py_GetExecPrefix()));
+        ...
+
+    #undef SET_SYS_FROM_STRING
+        if (PyErr_Occurred())
+            return NULL;
+        return m;
+        }
+
+在 Py_InitializeEx 中，builtin模块之后初始化, Python/pythonrun.c::
+
+   bimod = _PyBuiltin_Init();
+    if (bimod == NULL)
+        Py_FatalError("Py_Initialize: can't initialize __builtin__");
+    interp->builtins = PyModule_GetDict(bimod);
+    if (interp->builtins == NULL)
+        Py_FatalError("Py_Initialize: can't initialize builtins dict");
+    Py_INCREF(interp->builtins);
+
+    sysmod = _PySys_Init();
+    ...
+    PySys_SetPath(Py_GetPath());
+    PyDict_SetItemString(interp->sysdict, "modules",
+                         interp->modules);
+
+PySys_SetPath 负责生成sys.path 这个python object.
+
+sys.prefix, sys.exec_prefix, sys.executable, 还有sys.path 都和getpath.c有关。
+
+PYTHONHOME和progname, Python/pythonrun.c::
+
+    static char *progname = "python";
+
+    void
+    Py_SetProgramName(char *pn)
+    {
+        if (pn && *pn)
+            progname = pn;
+    }
+
+    char *
+    Py_GetProgramName(void)
+    {
+        return progname;
+    }
+
+    static char *default_home = NULL;
+
+    void
+    Py_SetPythonHome(char *home)
+    {
+        default_home = home;
+    }
+
+    char *
+    Py_GetPythonHome(void)
+    {
+        char *home = default_home;
+        if (home == NULL && !Py_IgnoreEnvironmentFlag)
+            home = Py_GETENV("PYTHONHOME");
+        return home;
+    }
+
+如果是命令行启动，progname被设置为argv[0], Modules/main.c::
+    
+    Py_SetProgramName(argv[0]);
+
+常量定义 Modules/getpath.c::
+
+    /* 路径定义*/
+    static char prefix[MAXPATHLEN+1];     /* sys.prefix */
+    static char exec_prefix[MAXPATHLEN+1];  /* sys.exec_prefix */
+    static char progpath[MAXPATHLEN+1];     /* sys.executable */
+    static char *module_search_path = NULL;  /* sys.path */
+    static char lib_python[] = "lib/python" VERSION;
+
+    #ifndef PREFIX
+    #  ifdef __VMS
+    #    define PREFIX ""
+    #  else
+    /* configure不指定时，默认为/usr/local。这个make install的默认不一样?*/
+    #    define PREFIX "/usr/local"
+    #  endif
+    #endif
+
+    #ifndef EXEC_PREFIX
+    #define EXEC_PREFIX PREFIX
+    #endif
+
+    #ifndef PYTHONPATH
+    #define PYTHONPATH PREFIX "/lib/python" VERSION ":" \
+                  EXEC_PREFIX "/lib/python" VERSION "/lib-dynload"
+    #endif
+
+    #ifndef LANDMARK
+    #define LANDMARK "os.py"
+    #endif
+    ...
+
+Makefile中定义有PYTHONPATH::
+
+    PYTHONPATH=$(COREPYTHONPATH)
+    COREPYTHONPATH=$(DESTPATH)$(SITEPATH)$(TESTPATH)$(MACHDEPPATH)$(EXTRAMACHDEPPATH)$(TKPATH)$(OLDPATH)
+    OLDPATH=:lib-old
+    TKPATH=:lib-tk
+    EXTRAMACHDEPPATH=
+    MACHDEPPATH=:plat-$(MACHDEP)
+    TESTPATH=
+    SITEPATH=
+    DESTPATH=
+    MACHDESTLIB=$(BINLIBDEST)
+    DESTLIB=$(LIBDEST)
+    ...
+
+    Modules/getpath.o: $(srcdir)/Modules/getpath.c Makefile
+        $(CC) -c $(PY_CFLAGS) -DPYTHONPATH='"$(PYTHONPATH)"' \
+            -DPREFIX='"$(prefix)"' \
+            -DEXEC_PREFIX='"$(exec_prefix)"' \
+            -DVERSION='"$(VERSION)"' \
+            -DVPATH='"$(VPATH)"' \
+            -o $@ $(srcdir)/Modules/getpath.c
+
+最主要的路径分析函数calculate_path，该函数的注释非常详尽，可仔细阅读，其只要目的是根据
+argv, $PYTHONHOME, $PYTHONPATH推测progpath, prefix, exec_prefix, module_search_path::
+
+    static void
+    calculate_path(void)
+    {
+        extern char *Py_GetProgramName(void);
+
+        static char delimiter[2] = {DELIM, '\0'};
+        static char separator[2] = {SEP, '\0'};
+        char *pythonpath = PYTHONPATH;
+        char *rtpypath = Py_GETENV("PYTHONPATH");
+        char *home = Py_GetPythonHome();
+        char *path = getenv("PATH");
+        char *prog = Py_GetProgramName();
+        char argv0_path[MAXPATHLEN+1];
+        char zip_path[MAXPATHLEN+1];
+        int pfound, efound; /* 1 if found; -1 if found build directory */
+        char *buf;
+        size_t bufsz;
+        size_t prefixsz;
+        char *defpath = pythonpath;
+        ...
+
+            /* 1.1 寻找progpath */
+            if (strchr(prog, SEP))
+                    strncpy(progpath, prog, MAXPATHLEN); /* 如果argv[0]含有分割符'/' */
+            ...
+            else if (path) {
+                    /* 没有'/'，可能是嵌入或直接运行 python 命令
+                     在 PATH中 查找 prog*/
+
+                    /* 如果是嵌入的python，则使用PATH搜到的python可执行文件可能并不是你所要的
+                    此时最好明确指定 PYTHONHOME。*/
+                    ...
+            }
+            else
+                    progpath[0] = '\0'; /* PATH 为空*/
+
+            if (progpath[0] != SEP && progpath[0] != '\0')
+                    absolutize(progpath);
+            /* 1.2 设置argv0_path */
+            strncpy(argv0_path, progpath, MAXPATHLEN);
+            argv0_path[MAXPATHLEN] = '\0';
+    ...
+
+    #if HAVE_READLINK
+        /* 转换符号连接 */
+        ...
+    #endif /* HAVE_READLINK */
+
+        reduce(argv0_path); /* dirname，转换为目录 */
+
+        /* 2. 根据标志性文件，查找prefix路径*/
+        if (!(pfound = search_for_prefix(argv0_path, home))) {
+            if (!Py_FrozenFlag)
+                fprintf(stderr,
+                    "Could not find platform independent libraries <prefix>\n");
+            /* ismodule 返回false的情况，直接使用PREFIX */
+            strncpy(prefix, PREFIX, MAXPATHLEN);
+            joinpath(prefix, lib_python);
+        }
+        else
+            reduce(prefix); 
+
+        /* 3. 获取python26.zip路径，在后面添加到sys.path */
+        strncpy(zip_path, prefix, MAXPATHLEN);
+        ...
+        bufsz = strlen(zip_path);   /* Replace "00" with version */
+        zip_path[bufsz - 6] = VERSION[0];
+        zip_path[bufsz - 5] = VERSION[2];
+
+        /* 4. 查找 exec_prefix */
+        if (!(efound = search_for_exec_prefix(argv0_path, home))) {
+            if (!Py_FrozenFlag)
+                fprintf(stderr,
+                    "Could not find platform dependent libraries <exec_prefix>\n");
+            strncpy(exec_prefix, EXEC_PREFIX, MAXPATHLEN);
+            joinpath(exec_prefix, "lib/lib-dynload");
+        }
+        /* If we found EXEC_PREFIX do *not* reduce it!  (Yet.) */
+
+        if ((!pfound || !efound) && !Py_FrozenFlag)
+            fprintf(stderr,
+                    "Consider setting $PYTHONHOME to <prefix>[:<exec_prefix>]\n");
+
+        /* sys.path中的路径临时存放在 rtpython 中, 注意宏PYTHONPATH 和环境变量
+        PYTHONPATH*/
+
+        /* Calculate size of return buffer.
+         */
+        bufsz = 0;
+
+        if (rtpypath)
+            bufsz += strlen(rtpypath) + 1;
+
+        prefixsz = strlen(prefix) + 1;
+
+        while (1) {
+            char *delim = strchr(defpath, DELIM);
+            /* 计算宏定义PYTHONPATH中的路径size*/
+
+        }
+
+        bufsz += strlen(zip_path) + 1;
+        bufsz += strlen(exec_prefix) + 1;
+
+
+        /* 5. 计算module_search_path即sys.path*/
+
+        /* This is the only malloc call in this file */
+        buf = (char *)PyMem_Malloc(bufsz);
+
+        if (buf == NULL) {
+            /* We can't exit, so print a warning and limp along */
+            fprintf(stderr, "Not enough memory for dynamic PYTHONPATH.\n");
+            fprintf(stderr, "Using default static PYTHONPATH.\n");
+            module_search_path = PYTHONPATH;
+        }
+        else {
+            /* Run-time value of $PYTHONPATH goes first */
+            /* 5.1 PYTHONPATH 环境变量*/
+            if (rtpypath) {
+                strcpy(buf, rtpypath);
+                strcat(buf, delimiter);
+            }
+            else
+                buf[0] = '\0';
+
+            /* Next is the default zip path */
+            /* 5.2 python26.zip*/
+            strcat(buf, zip_path);
+            strcat(buf, delimiter);
+
+            /* Next goes merge of compile-time $PYTHONPATH with
+             * dynamically located prefix.
+             */
+            defpath = pythonpath;
+            while (1) {
+                char *delim = strchr(defpath, DELIM);
+                /* 5.3 宏定义 PYTHONPATH */
+
+            }
+            strcat(buf, delimiter);
+            
+            /* 5.4 Finally, on goes the directory for dynamic-load modules */
+            strcat(buf, exec_prefix);
+
+            /* And publish the results */
+            module_search_path = buf;
+        }
+
+        /* 6. 善后处理 prefix, exec_prefix
+           分别从/usr/local/lib/python2.6, /usr/local/lib/python2.6/lib-dynload
+           转换为/usr/local, /usr/local
+        */
+        /* Reduce prefix and exec_prefix to their essence,
+         * e.g. /usr/local/lib/python1.5 is reduced to /usr/local.
+         * If we're loading relative to the build directory,
+         * return the compiled-in defaults instead.
+         */
+        if (pfound > 0) {
+            reduce(prefix);
+            reduce(prefix);
+            /* The prefix is the root directory, but reduce() chopped
+             * off the "/". */
+            if (!prefix[0])
+                    strcpy(prefix, separator);
+        }
+        else
+            strncpy(prefix, PREFIX, MAXPATHLEN);
+
+        if (efound > 0) {
+            reduce(exec_prefix);
+            reduce(exec_prefix);
+            reduce(exec_prefix);
+            if (!exec_prefix[0])
+                    strcpy(exec_prefix, separator);
+        }
+        else
+            strncpy(exec_prefix, EXEC_PREFIX, MAXPATHLEN);
+    }
+
+search_for_prefix::
+
+    /* 当此函数成功返回时，prefix存放有LANDMARK文件的完整路径*/
+    static int
+    search_for_prefix(char *argv0_path, char *home)
+    {
+        size_t n;
+        char *vpath;
+
+        /* If PYTHONHOME is set, we believe it unconditionally */
+        /* PYTHONHOME优先级最高 */
+        if (home) {
+            char *delim;
+            strncpy(prefix, home, MAXPATHLEN);
+            delim = strchr(prefix, DELIM);
+            if (delim)
+                *delim = '\0';
+            joinpath(prefix, lib_python);
+            joinpath(prefix, LANDMARK); /* prefix现在是os.py的完整路径 */
+            return 1;
+        }
+
+        /* Check to see if argv[0] is in the build directory */
+        strcpy(prefix, argv0_path);
+        joinpath(prefix, "Modules/Setup");
+        if (isfile(prefix)) {
+            /* Check VPATH to see if argv0_path is in the build directory. */
+            vpath = VPATH;
+            strcpy(prefix, argv0_path);
+            joinpath(prefix, vpath);
+            joinpath(prefix, "Lib");
+            joinpath(prefix, LANDMARK);
+            if (ismodule(prefix))
+                return -1; /* 返回-1 特殊情况表示源码目录*/
+        }
+
+        /* Search from argv0_path, until root is found */
+        /* 递归向上寻找LANDMARK文件 */
+        copy_absolute(prefix, argv0_path);
+        do {
+            n = strlen(prefix);
+            joinpath(prefix, lib_python);
+            joinpath(prefix, LANDMARK);
+            if (ismodule(prefix))
+                return 1;
+            prefix[n] = '\0';
+            reduce(prefix);
+        } while (prefix[0]);
+
+        /* 没找到，试试预定义的PREFIX? */
+        /* Look at configure's PREFIX */
+        strncpy(prefix, PREFIX, MAXPATHLEN);
+        joinpath(prefix, lib_python);
+        joinpath(prefix, LANDMARK);
+        if (ismodule(prefix))
+            return 1;
+
+        /* Fail */
+        return 0;
+    }
+
+search_for_exec_prefix和search_for_prefix类似, 只不过标志性文件为lib-dynload，
+如果没开启动态模块加载， 这个目录可能不存在，需要注意。
+
+在calculate_path做了繁重的准备之后, Py_GetProgramFullPath，Py_GetPrefix,
+Py_GetExecPrefix 只是简单的封装，在此就不赘述了。
+
+轻松时刻哈哈，判断python模块还可以更偷懒吗::
+
+    static int
+    ismodule(char *filename)        /* Is module -- check for .pyc/.pyo too */
+    {
+        if (isfile(filename))
+            return 1;
+
+        /* Check for the compiled version of prefix. */
+        if (strlen(filename) < MAXPATHLEN) {
+            strcat(filename, Py_OptimizeFlag ? "o" : "c");
+            if (isfile(filename))
+                return 1;
+        }
+        return 0;
+    }
+
+
+怎么指定要内建builtin的模块
+-----------------------------------
+Modules/Setup.dist 控制将要内建到python中的模块列表
+
 如果Setup文件不存在，make命令会将Setup.dist复制为Setup文件。但是一旦存在, 则
 不会在复制，故修改Setup.dist后，必须手动复制为Setup方能生效，或者你可以直接
 修改Setup文件。
 
-    sys.builtin_module_names
-
-进一步分析如何完成链接
-
-sys模块
--------
-Python/sysmodule.c
-sys.path
+todo: 进一步分析如何完成链接
 
 
 os模块
 ------
-对于linux来说，os模块的大多数操作是从posix模块中导入的，后者代码在
-Modules/posixmodule.c::
+Linux平台os模块函数多从posix模块中导入，代码在 Modules/posixmodule.c::
 
     _names = sys.builtin_module_names
 
@@ -1587,7 +1994,7 @@ Modules/posixmodule.c::
         __all__.extend(_get_exports_list(posix))
         del posix
 
-所以os.open实际上是posix.open，代码在Modules/posixmodule.c posix_open::
+所以os.open实际上是posix.open::
 
     >>> import os
     >>> import posix
@@ -1597,11 +2004,31 @@ Modules/posixmodule.c::
     3077348460L
     >>>
 
-其他系统有nt，os2等模块，这些才是真正的底层实现，os模块只是提供一个跨平台的
-封装。另，可以看出，os.path实际上posixpath模块的一个别名，代码在Lib/posixpath.py。
+os.path实际上posixpath模块的一个别名，代码在Lib/posixpath.py。
+
+其他平台有nt，os2等模块，这些才是真正的底层实现。os模块只提供跨平台封装。
 
 
-sys.path[0] python怎样找到你的模块
+多版本python的一些信息
+--------------------------
+
+python运行需要的信息如下：
+
+* 可执行文件python
+
+* .py标准库，.so c扩展所在位置
+
+* 第三方package，你在程序中导入的非标准库位置
+
+* 用户编写的.py文件位置
+
+知道以上信息，就可构建一个完整的python运行环境。
+
+
++++++++++++++有待清理的分割线+++++++++++++++++++++
+------------------------------------------------------
+
+import 模块导入分析
 --------------------------------------
 如果sys.path[0]是空字符串，则表示查找当前目录。python在搜索模块的时候，会遍历
 sys.path中所有的path，os.path.join(path, module_name)，如果path为'', 则自然
@@ -1621,69 +2048,15 @@ sys.path[0]在 ``PySys_SetArgvEx`` 中设置::
     to ''*/
     Modules/main.c:508:    PySys_SetArgv(argc-_PyOS_optind, argv+_PyOS_optind);
 
-
-PYTHONHOME和PYTHONPATH
------------------------
-calculate_path
-
-http://docs.python.org/tutorial/modules.html#the-module-search-path
-
-http://docs.python.org/using/cmdline.html#envvar-PYTHONPATH
-
-http://docs.python.org/using/cmdline.html#envvar-PYTHONHOME
-
-
-多版本python的一些信息
---------------------------
-python在启动的时候，会根据PYTHONHOME查看自身bin所在位置，从而推断出相应
-版本的标准lib所在位置。
-
-python运行需要的信息如下：
-
-* 可执行文件python
-
-* .py标准库，.so c扩展
-
-* 第三方package，你在程序中导入的非标准库
-
-* 用户模块, 你编写的.py文件
-
-知道以上信息，就可以构建一个完整的python运行环境。
-
-
-sys.executable来自何方
-------------------------
-Get_Path函数
-
-Modules/getpath.c
-
-module_search_path最终将成为sys.path
-
-一般情况下，sys.executable都会被正确设置，如交互模式，手动启动python命令执行
-文件。如果你在程序里嵌入Python，则可能有问题，虽然影响不大。
-
-
 import语句执行路径
---------------------------
-
 
 imp模块是怎么回事
--------------------
 imp可以实现更灵活的模块导入
 
-
-建立socket连接
------------------------
-
-    socket
-       bind
-          listen
-          connect
 
 
 解释器和c函数交互
 -----------------------------
 C扩展里定义的函数，怎么和python VM结合起来？
-
 
 
