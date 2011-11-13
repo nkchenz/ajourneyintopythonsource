@@ -2024,39 +2024,3 @@ python运行需要的信息如下：
 
 知道以上信息，就可构建一个完整的python运行环境。
 
-
-+++++++++++++有待清理的分割线+++++++++++++++++++++
-------------------------------------------------------
-
-import 模块导入分析
---------------------------------------
-如果sys.path[0]是空字符串，则表示查找当前目录。python在搜索模块的时候，会遍历
-sys.path中所有的path，os.path.join(path, module_name)，如果path为'', 则自然
-就是在当前目录查找。
-
-如果你把.py脚本文件作为参数传递给python解释器，那么sys.path[0]通常将是该文件
-所在目录，即os.path.dirname(yourfile)，这就是为什么导入相对目录的模块会起作用。
-
-sys.path[0]在 ``PySys_SetArgvEx`` 中设置::
-
-    jaime@ideer:~/source/Python-2.6.7$ grep -rn PySys_SetArgv Python/ Modules/
-    Python/frozenmain.c:48:    PySys_SetArgv(argc, argv);
-    Python/sysmodule.c:1531:PySys_SetArgvEx(int argc, char **argv, int updatepath)
-    Python/sysmodule.c:1635:PySys_SetArgv(int argc, char **argv)
-    Python/sysmodule.c:1637:    PySys_SetArgvEx(argc, argv, 1);
-    Modules/main.c:503:           so that PySys_SetArgv correctly sets sys.path[0]
-    to ''*/
-    Modules/main.c:508:    PySys_SetArgv(argc-_PyOS_optind, argv+_PyOS_optind);
-
-import语句执行路径
-
-imp模块是怎么回事
-imp可以实现更灵活的模块导入
-
-
-
-解释器和c函数交互
------------------------------
-C扩展里定义的函数，怎么和python VM结合起来？
-
-

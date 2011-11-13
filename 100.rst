@@ -1,6 +1,40 @@
 100 Miles
 ===========
 
+打开文件的几种方法
+--------------------
+
+模块和package
+----------------
+
+怎么判定两个模块是同一个模块
+------------------------------
+
+import 模块导入分析
+--------------------------------------
+如果sys.path[0]是空字符串，则表示查找当前目录。python在搜索模块的时候，会遍历
+sys.path中所有的path，os.path.join(path, module_name)，如果path为'', 则自然
+就是在当前目录查找。
+
+如果你把.py脚本文件作为参数传递给python解释器，那么sys.path[0]通常将是该文件
+所在目录，即os.path.dirname(yourfile)，这就是为什么导入相对目录的模块会起作用。
+
+sys.path[0]在 ``PySys_SetArgvEx`` 中设置::
+
+    jaime@ideer:~/source/Python-2.6.7$ grep -rn PySys_SetArgv Python/ Modules/
+    Python/frozenmain.c:48:    PySys_SetArgv(argc, argv);
+    Python/sysmodule.c:1531:PySys_SetArgvEx(int argc, char **argv, int updatepath)
+    Python/sysmodule.c:1635:PySys_SetArgv(int argc, char **argv)
+    Python/sysmodule.c:1637:    PySys_SetArgvEx(argc, argv, 1);
+    Modules/main.c:503:           so that PySys_SetArgv correctly sets sys.path[0]
+    to ''*/
+    Modules/main.c:508:    PySys_SetArgv(argc-_PyOS_optind, argv+_PyOS_optind);
+
+import语句执行路径
+
+imp模块是怎么回事
+imp可以实现更灵活的模块导入
+
 mod_wsgi 流程简单分析: 一个嵌入python的例子
 --------------------------------------------
 
@@ -956,5 +990,61 @@ Notes:
   这部分解释了为什么mod_python, mod_wsgi会冲突，因为他们都链接了同一个库libpython，
   如果协调 不善，则极易出问题。 http://code.google.com/p/modwsgi/wiki/InstallationIssues#Incompatible_ModPython_Versions
 
-- WSGIDaemonProcess todo
+daemon模式备忘
+~~~~~~~~~~~~~~~~~~~
+
+wsgi_daemon_index 存放process_group到socket的一个映射， 由进程组的名字， 可以找到该组
+进程正在监听的socket， 这个socket是与daemon通信的关键， 在fork之前创建， fork之后所有的子进程
+都可访问， daemon需要关掉所有不是本进程组的socket fd。
+
+wsgi_daemon_lists  所有已启动的daemon进程列表。
+
+在apache启动的时候， 由wsgi_hook_init 调用start_daemons，创建所有的daemons， 此后daemon的数量就是固定的了。
+
+pid7838 wsgi_hook_init调用返回之后， apache 又fork起了一个子进程 pid 7843， 非root权限， 调用wsgi_hook_child_init，此进程
+负责处理分发所有的请求， 对每个请求调用wsgi_hook_handler， 在wsgi_execute_remote中和真正的daemon进程通过
+socket进行交互， 该apache子进程可以被成为modwsgi的dispatcher。pid 7842是一个daemon进程。
+
+不管是embedded模式， 还是daemon模式， 最后都会走到wsgi_execute_script函数。
+
+请求headers， 标准的CGI变量， 是通过r->subprocess_env传递到daemon进程中的，  参见wsgi_build_environment, wsgi_send_request。
+对象r，从dispatcher到daemon， 跨越了不同的进程， 已经不是原来的r了， 这点需要注意。
+
+daemon进程如果发现需要reload代码， 则会发送一个0 Rejected 消息给dispatcher, 然后杀掉自己。apache捕获到daemon子进程死掉的信号， 
+重新启动一个daemon process， 仍然监听同一个socket。
+
+daemon如果发现一切正常， 不需要reload（新的daemon总是如此）， 会发送0 Continue的消息给dispatcher， 告诉它可以go on了。
+
+dispatcher如果收到0 Rejected信号， 会重新尝试连接，直到收到0 Continue或超出重试次数为止。实际上， 0 Continue可以被看作是一种同步机制。
+
+::
+
+
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7837] mod_wsgi.c:wsgi_hook_init:13658 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7837] mod_wsgi.c:wsgi_register_hooks:15564 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7838] mod_wsgi.c:wsgi_hook_init:13658 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7838] mod_wsgi.c:wsgi_python_init:5817 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7838] mod_wsgi.c:wsgi_python_init:5823 init python
+    [Sun Oct 30 13:00:17 2011] [info] mod_wsgi (pid=7838): Python home /usr/local/sae/python.
+    [Sun Oct 30 13:00:17 2011] [info] mod_wsgi (pid=7838): Initializing Python.
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7838] mod_wsgi.c:wsgi_start_daemons:11955 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7838] mod_wsgi.c:wsgi_start_process:11540 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7838] mod_wsgi.c:wsgi_start_process:11944 ok, we're father 
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7838] mod_wsgi.c:wsgi_hook_init:13754 forking a new process to listen all connections, will call wsgi_hook_child_init
+    [Sun Oct 30 13:00:17 2011] [warn] pid file /var/run/apache2.pid overwritten -- Unclean shutdown of previous Apache run?
+    [Sun Oct 30 13:00:17 2011] [notice] Apache/2.2.17 (Ubuntu) mod_wsgi/3.3 Python/2.6.7 configured -- resuming normal operations
+    [Sun Oct 30 13:00:17 2011] [info] Server built: Sep  1 2011 09:25:26
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7843] mod_wsgi.c:wsgi_hook_child_init:13784 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7843] mod_wsgi.c:wsgi_python_child_init:6883 init python further
+    [Sun Oct 30 13:00:17 2011] [info] mod_wsgi (pid=7843): Attach interpreter ''.
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7842] mod_wsgi.c:wsgi_start_process:11558 ok in child, we're a new daemon process
+    [Sun Oct 30 13:00:17 2011] [info] mod_wsgi (pid=7842): Starting process 'wic' with uid=1000, gid=1000 and threads=1.
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7842] mod_wsgi.c:wsgi_python_child_init:6883 init python further
+    [Sun Oct 30 13:00:17 2011] [info] mod_wsgi (pid=7842): Attach interpreter ''.
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7842] mod_wsgi.c:wsgi_daemon_main:11276 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7842] mod_wsgi.c:wsgi_daemon_main:11428 creating thread 0
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7842] mod_wsgi.c:wsgi_daemon_thread:11119 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7842] mod_wsgi.c:wsgi_daemon_worker:10887 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7842] mod_wsgi.c:wsgi_monitor_thread:11181 enter
+    [Sun Oct 30 13:00:17 2011] [error] [pid 7842] mod_wsgi.c:wsgi_monitor_thread:11203 check worker status
 
