@@ -2,17 +2,20 @@
 ====================
 
 pkg_resources.declare_namespace
+-------------------------------------
 
 
 source code reloading
 ----------------------------
-必须有一个dag才行:
+必须有一个dag才行
 
-    a.py:
+a.py::
+
     import b
     s = str(b.s)
 
-    b.py:
+b.py::
+
     s = "test"
 
 reload b 对a不起作用，严格意义上来讲，a已经不依赖于b，运行中的a已经成功bootstrap，脱离了b。除非生成一个新的a。
