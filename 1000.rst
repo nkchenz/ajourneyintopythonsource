@@ -5,6 +5,7 @@ cProfile
 
 Gevent and Gunicorn
 ----------------------------
+gunicorn: 0.14.2, gevent: 1.0b1
 
 gunicorn
 ~~~~~~~~~
