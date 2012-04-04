@@ -185,7 +185,7 @@ http://www.gevent.org/intro.html#event-loop
 
 更多请见下面的Hub.run。
 
-Watcher greenlet
+watcher greenlet
 ~~~~~~~~~~~~~~~~~~
 
 http://www.gevent.org/gevent.hub.html#module-gevent.hub
@@ -290,8 +290,7 @@ gevent::
          /
        WSGIServer
 
-TODO
-~~~~~~~~
-greenlet, libev
+
+# TODO: greenlet, libev
 
 Worker, I will free you.
