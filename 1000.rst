@@ -1,8 +1,297 @@
 1001 miles
 ============  
+cProfile
+----------------
 
 Gevent and Gunicorn
 ----------------------------
 
-cProfile
-----------------
+gunicorn
+~~~~~~~~~
+
+gunicorn是一个WSGI server，其核心是arbiter, worker管理模型。
+
+arbiter, 也即master进程，负责管理多个worker进程。每个worker都监听
+在同一个地址上，负责处理具体的web request。这个地址可以是ip:port，
+也可以是本地socket。master负责spawn，monitor, kill workers，而workers
+组成一个池子， 这个进程模型非常典型。
+
+gevent
+~~~~~~
+
+假设有greenlet F，包含三个操作A, B, C，依次顺序执行::
+
+    greenlet F:   A -> B -> C 
+
+如果在执行B的时候，有io数据还没就绪，则gevent会挂起当前greenlet，
+转而执行别的greenlet。当发现greenlet F的io数据就绪时，会继续原来B操作。
+在greenlet F看来，一切照常运行，就像阻塞了一段时间一样。这非常类似于
+操作系统和进程之间的关系，当一个进程进行阻塞IO时，os挂起该进程，选择
+别的进程执行，当其IO就绪后，又恢复现场继续原来的进程。
+如此看来，挂起阻塞的IO，转而执行别的任务，从而使cpu不至于空等待，这也是
+一个很典型的pattern。
+
+gevent要做的事情就是patch所有的阻塞io，在其中显示调用greenlet switch，
+io实际上变成异步的了，但是在greenlet内看来，结果仍是同步返回的。
+如果稍有不慎，系统中仍然有遗漏的阻塞io没有patch，这个greenlet就会一直
+占有cpu，导致其他greenlet无法运行，系统吞吐量则会急剧下降。
+
+info:
+串行: A, B, C 或者 A -> B -> C
+
+并行: A | B | 或者 [A B C]
+
+gevent(greenlet)在thread，process之外，提供了另外一种可能的并发模型。
+
+ggevent worker
+~~~~~~~~~~~~~~~~~~~
+上面说到gunicorn的arbiter:worker模型，ggevent就是gunicorn支持的一种worker类型，
+ggevent基于gevent，gevent基于greenlet。
+
+http://gunicorn.org/design.html
+
+阅读gunicorn代码请参阅 http://readthedocs.org/docs/gunicorn/en/latest/readstart.html
+
+下面来看一下ggevent的工作流程::
+
+    # 从Application开始
+    gunicorn.app.base.WSGIApplication.run
+    gunicorn.app.base.Application.run
+
+    # 关联到一个Arbiter，启动workers
+    gunicorn.arbiter.Arbiter.run
+                            .manager_workers
+                            .spawn_workers
+
+    # Worker初始化
+    gunicorn.workers.base.Worker.init_process
+    gunicorn.workers.ggevent.GeventWorker.run:
+            from gevent.pool import Pool
+            from gevent.server import StreamServer
+
+            pool = Pool(self.worker_connections)
+            ...
+            server = StreamServer(self.socket, handle=self.handle, spawn=pool)
+            server.start()
+        
+Pool是gevent用来控制并发greenlet的一种机制，如果pool没有满，则pool.spawn可以立即成功，否则需要等待。 http://www.gevent.org/gevent.pool.html#gevent.pool.Pool 该参数被传递给StreamServer，用来实现并发连接数控制。
+
+handle 参数也需注意，每个连接的具体处理，都在这个函数中完成，当server accept新连接之后，即回调此函数。
+
+注：实际上，ggevent的WSGI处理在这里走了另外一条路径，work为GeventPyWSGIWorker，使用了
+gevent.pywsgi.WSGIServer，而不是普通的StreamServer，在此就不深入了::
+
+         server = self.server_class(
+                self.socket, application=self.wsgi, spawn=pool, log=self.log,
+                handler_class=self.wsgi_handler)
+    
+application即为你的wsgi callable，handler_class则是gevent.pywsgi.WSGIHandler。        
+
+::
+
+    gunicorn.workers.ggevent.GeventWorker.handle
+    gunicorn.workers.ggevent.AsyncWorker.handle 
+    gunicorn.workers.ggevent.GeventWorker.handle_request
+    gunicorn.workers.ggevent.AsyncWorker.handle_request
+
+细看handle::
+
+    def handle(self, client, addr):
+            try:
+                parser = http.RequestParser(self.cfg, client)
+                try:
+                    while True:
+                        req = None
+                        with self.timeout_ctx():
+                            req = parser.next()
+                        if not req:
+                            break
+                        self.handle_request(req, client, addr)
+                except StopIteration, e:
+                    self.log.debug("Closing connection. %s", e)
+            except socket.error, e:
+                ...
+            finally:
+                util.close(client)
+
+这是一个循环，从client连接中不断的读出http请求，依次处理，知道没有请求
+可以读为止。这很有意思，因为它为你提供了在一个http连接中发送多个http请求
+的可能性。实际上，由于client是一个普通的socket，你甚至可以不用http协议，
+你可以自定义一个协议，只需将parser换成可以解析你的协议请求的parser。
+
+pre_request, post_request钩子，具体wsgi执行都在 handle_request中。
+
+OK, 继续看server.start的流程：
+
+    gevent.server.StreamServer.start
+    gevent.server.BaseServer.start
+    gevent.server.BaseServer.start_accepting:
+            if self._watcher is None:
+                # just stop watcher without creating a new one?
+                self._watcher = self.loop.io(self.socket.fileno(), 1)
+                self._watcher.start(self._do_read)
+
+这个watcher的作用是启动一个greenlet，利用libev来监听socket，一旦有io就调用_do_read callback，后者又调用do_handle会为每个连接启动一个新的greentlet处理::
+
+    gevent.server.BaseServer._do_read
+    gevent.server.BaseServer.do_handle
+
+    def set_spawn(self, spawn):
+        ...
+        elif hasattr(spawn, 'spawn'):
+            self.pool = spawn # 即上面传进来的pool参数
+            self._spawn = spawn.spawn
+        elif ...
+        
+    def do_handle(self, *args):
+        spawn = self._spawn
+        if spawn is None:
+            self._handle(*args) # 即创建server时的handle回调函数
+        else:
+            spawn(self._handle, *args)
+
+    def _do_read(self):
+        for _ in xrange(self.max_accept):
+            if self.full():
+                self.stop_accepting()
+                return
+            try:
+                args = self.do_read()
+                self.delay = self.min_delay
+                if not args:
+                    return
+            except:
+                self.loop.handle_error(self, *sys.exc_info())
+                ...
+            else:
+                try:
+                    self.do_handle(*args)
+                except:
+                    self.loop.handle_error((args[1:], self), *sys.exc_info())
+                    ...
+
+_watcher.start并不是一个loop，只是spawn一个greenlet就返回了。 如果start_accepting
+立即返回，start也就返回了，问：那么loop在哪里？整个server的主循环在哪里？答曰：
+本来就没有loop，整个程序都是由gevent驱动greenlet的，gevent也没有loop，或者可以说,
+gvent没有显式loop，整个系统是由libev的主循环驱动的::
+
+    Unlike other network libraries and similar to eventlet, gevent starts the event 
+    loop implicitly in a dedicated greenlet. There’s no reactor that you must run() or 
+    dispatch() function to call. When a function from gevent API wants to block, 
+    it obtains the Hub instance - a greenlet that runs the event loop - and switches to 
+    it. If there’s no Hub instance yet, one is created on the fly.
+
+http://www.gevent.org/intro.html#event-loop
+
+更多请见下面的Hub.run。
+
+Watcher greenlet
+~~~~~~~~~~~~~~~~~~
+
+http://www.gevent.org/gevent.hub.html#module-gevent.hub
+
+watcher.start::
+
+    gevent.server.BaseServer:
+        self.loop = gevent.get_hub().loop
+        ...
+        self._watcher = self.loop.io(self.socket.fileno(), 1)
+        self._watcher.start(self._do_read)
+
+    gevent.get_hub
+    gevent.hub.Hub.__init__:
+        loop_class = config('gevent.core.loop', 'GEVENT_LOOP')
+        ...
+        self.loop = loop_class(flags=loop, default=default)
+
+gevent.core.loop在gevent/gevent/core.ppyx中定义, loop.io方法返回一个
+watcher::
+
+    gevent.core.loop.io:
+        def io(self, int fd, int events, ref=True):
+            return io(self, fd, events, ref)
+    gevent.core.io: # 调用ev_io_init初始化fd
+        libev.ev_io_init(&self._watcher, <void *>gevent_callback_io, fd, events)
+
+watcher.start::
+    gevent.core.io.start:
+        self.callback = callback
+        ...
+        libev.ev_io_start(self.loop._ptr, &self._watcher) # 激活ev_io self._watcher
+
+ev_io_init的回调是gevent_callback_io, 而watcher.start的回调是callback
+self._do_read，这两者是怎么关联起来呢？gevent/gevent/callbacks.c::
+
+    #define GET_OBJECT(PY_TYPE, EV_PTR, MEMBER) \
+    ((struct PY_TYPE *)(((char *)EV_PTR) - offsetof(struct PY_TYPE, MEMBER)))
+    ...
+
+    #define DEFINE_CALLBACK(WATCHER_LC, WATCHER_TYPE) \
+        static void gevent_callback_##WATCHER_LC(struct ev_loop *_loop, void *c_watcher, int revents) {                  \
+            struct PyGevent##WATCHER_TYPE##Object* watcher = GET_OBJECT(PyGevent##WATCHER_TYPE##Object, c_watcher, _watcher);    \
+            gevent_callback(watcher->loop, watcher->_callback, watcher->args, (PyObject*)watcher, c_watcher, revents); \
+        }
+
+_callback实际上就是在io.start函数中设置的callback，请参见core.ppyx中WATCHER_BASE宏定义。
+
+ev_io_init的第一个参数，watcher._watcher，纯的裸libev.ev_io类型，当gevent_callback_io
+被调用时，又被传递回来了即这个c_watcher，那么怎么找到对应的python io class对象即
+watcher呢？GET_OBJECT即是答案，它可以从一个对象成员的c指针，倒推出这个对象来，强大。 
+
+上面即是watcher.start的全部过程，get_hub自动创建了一个gevent.hub.Hub实例，一个greenlet， 整个event loop就在其Hub.run方法::
+
+    gevent.hub.Hub.run
+    gevent.core.loop.run:
+
+        def run(self, nowait=False, once=False):
+            cdef unsigned int flags = 0
+            if nowait:
+                flags |= libev.EVRUN_NOWAIT
+            if once:
+                flags |= libev.EVRUN_ONCE
+            with nogil:
+                libev.ev_run(self._ptr, flags)
+
+终于，大boss出现，关于ev_run文档上这样描述::
+
+    bool ev_run (loop, int flags)
+
+    Finally, this is it, the event handler. This function usually is called after
+    you have initialised all your watchers and you want to start handling events.
+    It will ask the operating system for any new events, call the watcher
+    callbacks, and then repeat the whole process indefinitely: This is why event
+    loops are called loops.
+
+http://pod.tst.eu/http://cvs.schmorp.de/libev/ev.pod
+
+继承关系图
+~~~~~~~~~~~~~~
+
+gunicorn::
+
+              Application
+              /            \               \
+      WSGIApplication  DjangoApplication   PasterBaseApplication
+
+
+                   Worker
+                /            \            \
+            AsyncWorker     SyncWorker   TornaoWorker
+               /    \            
+      GeventWorker  EventletWorker
+
+
+gevent::
+
+                BaseServer
+             /             \
+         StreamServer     DatagramServer
+
+         /
+       WSGIServer
+
+TODO
+~~~~~~~~
+greenlet, libev
+
+Worker, I will free you.

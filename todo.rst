@@ -1,5 +1,25 @@
 10000 Miles
 ===========
+
+__init__.py 在什么时候被执行
+--------------------------------
+::
+
+    jaime@westeros:~/source/longtalk/lib$ cat __init__.py
+    class Helper:
+        pass
+    jaime@westeros:~/source/longtalk/lib$ cat settings.py
+    import lib.Helper
+    jaime@westeros:~/source/longtalk/lib$ cd ../
+    jaime@westeros:~/source/longtalk$ python -c 'import lib.settings'
+    Traceback (most recent call last):
+      File "<string>", line 1, in <module>
+      File "lib/settings.py", line 1, in <module>
+        import lib.Helper
+    ImportError: No module named Helper
+    jaime@westeros:~/source/longtalk$ 
+
+
 Py_NewInterpreter
 ----------------------------
 
@@ -22,7 +42,3 @@ __repr__
 __next__
 
 动态改变method函数定义的能力
-
-Python源码动态展示
----------------------
-Python是一个复杂的有机体，能否像展示dna模型那样动态展示出来？交互式的 n dimension source code map
