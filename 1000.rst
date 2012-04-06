@@ -120,9 +120,7 @@ pre_request, post_request钩子，具体wsgi执行都在 handle_request中。
     gevent.pywsgi.WSGIServer，在上面创建server的时候，走的是和StreamServer不同的分支，
     在此就不深入了。
 
-    server = self.server_class(
-            self.socket, application=self.wsgi, spawn=pool, log=self.log,
-            handler_class=self.wsgi_handler)
+    server = self.server_class( self.socket, application=self.wsgi, spawn=pool, log=self.log, handler_class=self.wsgi_handler)
     
     application即为你的wsgi callable，handler_class则是gevent.pywsgi.WSGIHandler。        
 
