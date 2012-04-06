@@ -118,11 +118,11 @@ pre_request, post_request钩子，具体wsgi执行都在 handle_request中。
     这是一般WSGI应用的标准处理流程。和gevent worker类似的，还有一个gevent_pywsgi worker，
     它使用gevent自带的WSGI处理程序。work class为GeventPyWSGIWorker，server_class为
     gevent.pywsgi.WSGIServer，在上面创建server的时候，走的是和StreamServer不同的分支，
-    在此就不深入了::
+    在此就不深入了。
 
-         server = self.server_class(
-                self.socket, application=self.wsgi, spawn=pool, log=self.log,
-                handler_class=self.wsgi_handler)
+    server = self.server_class(
+            self.socket, application=self.wsgi, spawn=pool, log=self.log,
+            handler_class=self.wsgi_handler)
     
     application即为你的wsgi callable，handler_class则是gevent.pywsgi.WSGIHandler。        
 
