@@ -1,8 +1,5 @@
 1001 miles
 ============  
-cProfile
-----------------
-
 Gevent and Gunicorn
 ----------------------------
 gunicorn: 0.14.2, gevent: 1.0b1
