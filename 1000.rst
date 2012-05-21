@@ -291,6 +291,147 @@ gevent::
        WSGIServer
 
 
+gunicorn reloading
+~~~~~~~~~~~~~~~~~~~~~~~~
+gunicorn 目前尚无自动reload机制，修改代码后需要发送SIGHUB给master进程，通知重新加载。
+
+https://github.com/benoitc/gunicorn/issues/154
+
+gunicorn.aribter.Arbiter init_signals 函数设置signal函数为所有信号的handler，而signal函数
+只是把信号放入队列中，具体的处理统一在run函数中，这样的好处可能是降低信号handler异步执行的风险。
+只有SIGCHLD信号被特殊处理。
+
+::
+
+    def init_signals(self):
+        ...
+        map(lambda s: signal.signal(s, self.signal), self.SIGNALS)
+        signal.signal(signal.SIGCHLD, self.handle_chld)
+
+    def signal(self, sig, frame):
+        if len(self.SIG_QUEUE) < 5:
+            self.SIG_QUEUE.append(sig)
+            self.wakeup()
+
+    def run(self):
+        "Main master loop."
+        self.start()
+        ...
+        self.manage_workers()
+        while True:
+            try:
+                self.reap_workers()
+                sig = self.SIG_QUEUE.pop(0) if len(self.SIG_QUEUE) else None
+                if sig is None:
+                    self.sleep()
+                    self.murder_workers()
+                    self.manage_workers()
+                    continue
+                ...
+                signame = self.SIG_NAMES.get(sig)
+                handler = getattr(self, "handle_%s" % signame, None)
+                ...
+                self.log.info("Handling signal: %s", signame)
+                handler()
+                self.wakeup()
+                ...
+
+    def handle_chld(self, sig, frame):
+        "SIGCHLD handling"
+        self.wakeup()
+
+    def handle_hup(self):
+        """\
+        HUP handling.
+        - Reload configuration
+        - Start the new worker processes with a new configuration
+        - Gracefully shutdown the old worker processes
+        """
+        self.log.info("Hang up: %s", self.master_name)
+        self.reload()
+
+handle_hup 负责处理HUB信号::
+
+   def reload(self):
+        ...
+        # reload conf
+        self.app.reload()
+        self.setup(self.app)
+        ...
+        # spawn new workers with new app & conf
+        self.cfg.on_reload(self)
+        ...
+        self.manage_workers()
+
+self.app.reload在gunicorn.app.base.Application中定义，完成的工作只是重新加载app配置。
+
+生成新的worker process是在self.cfg.on_reload，gunicorn.config::
+
+    class OnReload(Setting):
+        name = "on_reload"
+        section = "Server Hooks"
+        validator = validate_callable(1)
+        type = "callable"
+        def on_reload(server):
+            for i in range(server.app.cfg.workers):
+                server.spawn_worker()
+        default = staticmethod(on_reload)
+        desc = """\
+            Called to recycle workers during a reload via SIGHUP.
+
+            The callable needs to accept a single instance variable for the Arbiter.
+            """
+
+又生成了同样数量的worker。但是，老的worker怎么办？到此为止，好像还没有被杀掉。。。且往下看。
+
+gunicorn.arbiter.Arbiter::
+
+    def spawn_worker(self):
+        self.worker_age += 1
+        worker = self.worker_class(self.worker_age, self.pid, self.LISTENER,
+                                    self.app, self.timeout/2.0,
+                                    self.cfg, self.log)
+        self.cfg.pre_fork(self, worker)
+        pid = os.fork()
+        if pid != 0:
+            self.WORKERS[pid] = worker
+            return pid
+
+        # Process Child
+        worker_pid = os.getpid()
+        ...
+ 
+注意worker_age这个递增id，每个master唯一，被传递给了worker_class。gunicorn.workers.base.Worker::
+
+    class Worker(object):
+        ...
+        def __init__(self, age, ppid, socket, app, timeout, cfg, log):
+            """\
+            This is called pre-fork so it shouldn't do anything to the
+            current process. If there's a need to make process wide
+            changes you'll want to do that in ``self.init_process()``.
+            """
+            self.age = age
+            ...
+
+此时系统中有双倍的worker，下次arbiter.run循环会调用manage_worker，我们已经知道，它会保证worker数量
+在可控范围之内，杀掉多余的worker, gunicorn.arbiter.Arbiter::
+
+        def manage_workers(self):
+            if len(self.WORKERS.keys()) < self.num_workers:
+                self.spawn_workers()
+
+            workers = self.WORKERS.items()
+            workers.sort(key=lambda w: w[1].age)
+            while len(workers) > self.num_workers:
+                (pid, _) = workers.pop(0)
+                self.kill_worker(pid, signal.SIGQUIT)
+
+原来manager_workers先根据worker的age排序，然后杀掉最老的worker，这样所有发送HUB前的老worker就全被kill了，
+剩下只有更新后生成的同样数量的worker，至此worker process全部完成更新。
+
+
 # TODO: greenlet, libev
 
 Worker, I will free you.
+
