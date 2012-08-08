@@ -6,8 +6,7 @@ cProfile
 
 cProfile是python的性能测试模块，它只是_lsprof模块的一个封装，用来展示输出后者收集的数据。
 
-运行profile实际上是在enable，disable profile开关::
-
+运行profile实际上是在enable，disable Python VM的profiling功能。
 
 Lib/cProfile.py::
 
@@ -81,7 +80,52 @@ Module/_lsprof.c::
 最重要是PyTrace_CALL, PyTrace_RETURN这两个信号，分别表示将要进入和返回函数。
 详细请参考 http://docs.python.org/release/2.6.7/c-api/init.html#PyTrace_CALL
 
-patch::
+要搞清楚ptrace_enter_call, ptrace_leave_call怎么回事，需要明白两个数据结构::
+
+    /* represents a function or user defined block */
+    typedef struct _ProfilerEntry {
+        rotating_node_t header;
+        PyObject *userObj; /* PyCodeObject, or a descriptive str for builtins */
+        PY_LONG_LONG tt; /* total time in this entry */
+        PY_LONG_LONG it; /* inline time in this entry (not in subcalls) */
+        long callcount; /* how many times this was called */
+        long recursivecallcount; /* how many times called recursively */
+        long recursionLevel;
+        rotating_node_t *calls;
+    } ProfilerEntry;
+
+    typedef struct _ProfilerContext {
+        PY_LONG_LONG t0;
+        PY_LONG_LONG subt;
+        struct _ProfilerContext *previous;
+        ProfilerEntry *ctxEntry;
+    } ProfilerContext;
+
+
+- ProfilerContext
+
+  可以认为时调用堆栈链，previous指向上层调用者。存放单次计时的状态，比如进入该函数的时间t0，所有子函数耗时subt，
+  这两个数据在退出函数时即Stop函数中，用来计算本次调用的tt以及it，然后累加到该函数对应的全局entry中。
+
+- ProfilerEntry
+
+  计时汇总信息，每个callable只对应一个entry，在这里含有所有该函数的性能数据，如
+  调用次数callcount，递归调用次数recursivecallcount，当前递归深度recursionLevel，总耗时tt，去除subcall耗时之后该函数自身耗时it等
+
+
+foo递归调用自己，然后又调用foo1，则上面的结构看起来如下::
+
+    Context:                    Entry:
+
+    foo                         foo
+    foo                         foo1
+    foo
+    foo
+    foo1    
+      
+开始时间，结束时间分别在initContext, Stop中获得，调用CALL_TIMER(pObj)，单位为微秒，参见 hpTimer()。
+
+以下是在进入，退出函数时打印一些信息的patch::
 
     diff --git a/Modules/_lsprof.c b/Modules/_lsprof.c
     index 049c94d..53819ae 100644
@@ -91,7 +135,7 @@ patch::
      static void
      initContext(ProfilerObject *pObj, ProfilerContext *self, ProfilerEntry *entry)
      {
-    +    if (PyCode_Check(entry->userObj)){
+    +    if (PyCode_Check(entry->userObj)){ #要进入的函数可能不是PyCodeObject类型，比如上面的PyTrace_C_CALL
     +        printf("Entering func %s\n", PyString_AS_STRING(((PyCodeObject *)entry->userObj)->co_name));
     +    }
     +
@@ -107,17 +151,17 @@ patch::
     +    // Pure time not included sub calls
          PY_LONG_LONG it = tt - self->subt;
          if (self->previous)
-             self->previous->subt += tt;
+             self->previous->subt += tt;   # 把本次调用的总耗时算到上一层调用者的子调用耗时里，这样上面的it=tt->self.subt就说的通了
          pObj->currentProfilerContext = self->previous;
     +
     +    // Increase the time spent  in a function after all recursion is over
          if (--entry->recursionLevel == 0)
-             entry->tt += tt;
+             entry->tt += tt; # 累加 
          else
              ++entry->recursivecallcount;
     +
     +    // Increase pure time every recursion
-         entry->it += it;
+         entry->it += it; # 累加
          entry->callcount++;
     +    double collect_factor = hpTimerUnit();
     +
@@ -256,6 +300,7 @@ Lib/cProfile.py ::
             tt = entry.inlinetime        # tottime column of pstats
             ct = entry.totaltime         # cumtime column of pstats
 
+cc 为递归除外的调用次数，即4/1中的1。
 
 Gevent and Gunicorn
 ----------------------------

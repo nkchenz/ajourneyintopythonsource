@@ -1,6 +1,9 @@
 10000 Miles TODO
 ==================
 
+libs
+------------------
+
 core lang: [a, b, c]
 
 Libs: Sys, User
@@ -22,9 +25,6 @@ lib的名字应该保持稳定
 
 Lib是一种接口
 
-
-cProfile
-----------------
 
 pkg_resources.declare_namespace
 -------------------------------------
