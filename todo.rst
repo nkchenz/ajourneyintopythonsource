@@ -1,6 +1,28 @@
 10000 Miles TODO
 ==================
 
+core lang: [a, b, c]
+
+Libs: Sys, User
+
+Lib: Key -> Object
+
+Lang Eco: DAG of Libs
+
+Lib is Namespace
+
+程序需要一种方法由lib名字找到lib所在的位置
+lib的名字应该保持稳定
+
+虚拟环境是一个自洽的DAG
+
+因为复杂系统由不同实体完成，所以就需要合作。
+
+要合作必须由接口。
+
+Lib是一种接口
+
+
 cProfile
 ----------------
 

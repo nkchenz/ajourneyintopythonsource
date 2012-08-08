@@ -1,5 +1,262 @@
 1001 miles
 ============  
+
+cProfile
+--------------
+
+cProfile是python的性能测试模块，它只是_lsprof模块的一个封装，用来展示输出后者收集的数据。
+
+运行profile实际上是在enable，disable profile开关::
+
+
+Lib/cProfile.py::
+
+    class Profile(_lsprof.Profiler):
+        """Profile(custom_timer=None, time_unit=None, subcalls=True, builtins=True)
+
+        ...
+     
+        def runctx(self, cmd, globals, locals):
+            self.enable()
+            try:
+                exec cmd in globals, locals
+            finally:
+                self.disable()
+            return self
+
+Module/_lsprof.c::
+
+    static PyObject*
+    profiler_enable(ProfilerObject *self, PyObject *args, PyObject *kwds)
+    {
+        int subcalls = -1;
+        int builtins = -1;
+        static char *kwlist[] = {"subcalls", "builtins", 0};
+        if (!PyArg_ParseTupleAndKeywords(args, kwds, "|ii:enable",
+                                         kwlist, &subcalls, &builtins))
+            return NULL;
+        if (setSubcalls(self, subcalls) < 0 || setBuiltins(self, builtins) < 0)
+            return NULL;
+        PyEval_SetProfile(profiler_callback, (PyObject*)self);
+        self->flags |= POF_ENABLED;
+        Py_INCREF(Py_None);
+        return Py_None;
+    }
+
+调用PyEval_SetProfile设置了一个callback profiler_callback, 这样python vm在进入函数，
+从函数返回前就会告诉我们::
+
+    static int
+    profiler_callback(PyObject *self, PyFrameObject *frame, int what,
+                      PyObject *arg)
+    {
+        switch (what) {
+
+        /* the 'frame' of a called function is about to start its execution */
+        case PyTrace_CALL:
+            ptrace_enter_call(self, (void *)frame->f_code,
+                                   (PyObject *)frame->f_code);
+
+            break;
+
+        /* the 'frame' of a called function is about to finish
+           (either normally or with an exception) */
+        case PyTrace_RETURN:
+            ptrace_leave_call(self, (void *)frame->f_code);
+            break;
+
+        /* case PyTrace_EXCEPTION:
+            If the exception results in the function exiting, a
+            PyTrace_RETURN event will be generated, so we don't need to
+            handle it. */
+
+    #ifdef PyTrace_C_CALL   /* not defined in Python <= 2.3 */
+        /* the Python function 'frame' is issuing a call to the built-in
+           function 'arg' */
+        case PyTrace_C_CALL:
+                ...
+    #endif
+        ...
+
+最重要是PyTrace_CALL, PyTrace_RETURN这两个信号，分别表示将要进入和返回函数。
+详细请参考 http://docs.python.org/release/2.6.7/c-api/init.html#PyTrace_CALL
+
+patch::
+
+    diff --git a/Modules/_lsprof.c b/Modules/_lsprof.c
+    index 049c94d..53819ae 100644
+    --- a/Modules/_lsprof.c
+    +++ b/Modules/_lsprof.c
+    @@ -319,6 +319,10 @@ static void clearEntries(ProfilerObject *pObj)
+     static void
+     initContext(ProfilerObject *pObj, ProfilerContext *self, ProfilerEntry *entry)
+     {
+    +    if (PyCode_Check(entry->userObj)){
+    +        printf("Entering func %s\n", PyString_AS_STRING(((PyCodeObject *)entry->userObj)->co_name));
+    +    }
+    +
+         self->ctxEntry = entry;
+         self->subt = 0;
+         self->previous = pObj->currentProfilerContext;
+    @@ -339,17 +343,30 @@ initContext(ProfilerObject *pObj, ProfilerContext *self, ProfilerEntry *entry)
+     static void
+     Stop(ProfilerObject *pObj, ProfilerContext *self, ProfilerEntry *entry)
+     {
+    +    // Total time spent in this level of recursion of a function
+         PY_LONG_LONG tt = CALL_TIMER(pObj) - self->t0;
+    +    // Pure time not included sub calls
+         PY_LONG_LONG it = tt - self->subt;
+         if (self->previous)
+             self->previous->subt += tt;
+         pObj->currentProfilerContext = self->previous;
+    +
+    +    // Increase the time spent  in a function after all recursion is over
+         if (--entry->recursionLevel == 0)
+             entry->tt += tt;
+         else
+             ++entry->recursivecallcount;
+    +
+    +    // Increase pure time every recursion
+         entry->it += it;
+         entry->callcount++;
+    +    double collect_factor = hpTimerUnit();
+    +
+    +    if (PyCode_Check(entry->userObj)){
+    +        printf("Leaving func %20s  ", PyString_AS_STRING(((PyCodeObject *)entry->userObj)->co_name));
+    +        printf("Timers: tt %.4f, it %.4f, nc %d, rl %d\n", entry->tt * collect_factor, 
+    +            entry->it * collect_factor, entry->callcount, entry->recursionLevel);
+    +    }
+         if ((pObj->flags & POF_SUBCALLS) && self->previous) {
+             /* find or create an entry for me in my caller's entry */
+             ProfilerEntry *caller = self->previous->ctxEntry;
+    @@ -441,7 +458,8 @@ profiler_callback(PyObject *self, PyFrameObject *frame, int what,
+         /* the 'frame' of a called function is about to start its execution */
+         case PyTrace_CALL:
+             ptrace_enter_call(self, (void *)frame->f_code,
+    -                                (PyObject *)frame->f_code);
+    +                               (PyObject *)frame->f_code);
+    +
+             break;
+     
+         /* the 'frame' of a called function is about to finish
+    @@ -593,7 +611,7 @@ static int statsForEntry(rotating_node_t *node, void *arg)
+                                      entry->userObj,
+                                      entry->callcount,
+                                      entry->recursivecallcount,
+    -                                 collect->factor * entry->tt,
+    +                                 collect->factor * entry->tt, // NOTE
+                                      collect->factor * entry->it,
+                                      collect->sublist);
+         Py_DECREF(collect->sublist);
+    @@ -628,6 +646,7 @@ profiler_subentry objects:\n\
+         inlinetime    inline time (not in further subcalls)\n\
+     ");
+     
+    +
+     static PyObject*
+     profiler_getstats(ProfilerObject *pObj, PyObject* noarg)
+     {
+    20:46 jaime@oldtown Python-2.6.7 (cprofile)$ 
+
+用来profile的测试文件， test.py::
+
+    import time
+
+    def foo1():
+        time.sleep(1)
+
+    def foo(n):
+        foo1()
+        if n > 0:
+            return foo(n - 1)
+        t = 1
+        i = 1
+        while i< 10000:
+            i += 1
+            t *= i
+        return 42
+
+    class A:
+        def test(self):
+            foo(3)
+
+    print 'foo', id(foo)
+    print 'foo1', id(foo1)
+
+    a = A()
+    print 'A.test', id(a.test)
+    print 'A.test', id(A().test)
+    a.test()
+
+foo递归调用自己，每次都调用foo1。为了区别，我们在最后一次调用foo时做了一些计算，这次调用自身也消耗一些时间。profile以可执行的函数为最小单位来计算耗时，每个callable都是一个entry。class的method也是callable，具有全局唯一的地址即id，和绑定到哪个实例没有关系，只有一个entry。
+
+output::
+
+    20:50 jaime@oldtown Python-2.6.7 (cprofile)$ ./python.exe -m cProfile test/profile.py 
+    Entering func <module>
+    Entering func <module>
+    Entering func A
+    Leaving func                    A  Timers: tt 0.0000, it 0.0000, nc 1, rl 0
+    foo 4299829448
+    foo1 4299808352
+    A.test 4299358368
+    A.test 4299358368
+    Entering func test
+    Entering func foo
+    Entering func foo1
+    Leaving func                 foo1  Timers: tt 1.0009, it 0.0000, nc 1, rl 0
+    Entering func foo
+    Entering func foo1
+    Leaving func                 foo1  Timers: tt 2.0021, it 0.0001, nc 2, rl 0
+    Entering func foo
+    Entering func foo1
+    Leaving func                 foo1  Timers: tt 3.0032, it 0.0001, nc 3, rl 0
+    Entering func foo
+    Entering func foo1
+    Leaving func                 foo1  Timers: tt 4.0043, it 0.0001, nc 4, rl 0
+    Leaving func                  foo  Timers: tt 0.0000, it 0.0660, nc 1, rl 3
+    Leaving func                  foo  Timers: tt 0.0000, it 0.0662, nc 2, rl 2
+    Leaving func                  foo  Timers: tt 0.0000, it 0.0664, nc 3, rl 1
+    Leaving func                  foo  Timers: tt 4.0708, it 0.0665, nc 4, rl 0
+    Leaving func                 test  Timers: tt 4.0708, it 0.0000, nc 1, rl 0
+    Leaving func             <module>  Timers: tt 4.0715, it 0.0007, nc 1, rl 0
+    Leaving func             <module>  Timers: tt 4.0718, it 0.0000, nc 1, rl 0
+             22 function calls (19 primitive calls) in 4.072 CPU seconds
+
+       Ordered by: standard name
+
+       ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+            1    0.000    0.000    4.072    4.072 <string>:1(<module>)
+            1    0.001    0.001    4.071    4.071 profile.py:1(<module>)
+            1    0.000    0.000    0.000    0.000 profile.py:17(A)
+            1    0.000    0.000    4.071    4.071 profile.py:18(test)
+            4    0.000    0.000    4.004    1.001 profile.py:3(foo1)
+          4/1    0.066    0.017    4.071    4.071 profile.py:6(foo)
+            1    0.000    0.000    4.072    4.072 {execfile}
+            4    0.000    0.000    0.000    0.000 {id}
+            1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+            4    4.004    1.001    4.004    1.001 {time.sleep}
+
+可以看出，每次调用foo1返回后，foo1这个entry的总耗时就加1s，foo1没有自身耗时，调用次数加1，递归深度一直为0.
+而foo则不同，输出最早的那个`Leaving func foo`是最深的那次递归，递归深度rl为3，自身耗时为0.0660s，其后各次递归都没有自身耗时。当最上层foo返回即rl为0时，才计算entry foo的总耗时，为4.0708s。
+
+对比下面的cProfile输出，可以看到tottime实际上对应于it，而不是tt，是指函数自身耗时，不包括subcall的耗时，所以可能叫inlinetime更为合适:) cumtime才是tt，函数总耗时。
+
+Lib/cProfile.py ::
+
+    def snapshot_stats(self):
+        entries = self.getstats()
+        self.stats = {}
+        callersdicts = {}
+        # call information
+        for entry in entries:
+            func = label(entry.code)
+            nc = entry.callcount         # ncalls column of pstats (before '/')
+            cc = nc - entry.reccallcount # ncalls column of pstats (after '/')
+            tt = entry.inlinetime        # tottime column of pstats
+            ct = entry.totaltime         # cumtime column of pstats
+
+
 Gevent and Gunicorn
 ----------------------------
 gunicorn: 0.14.2, gevent: 1.0b1
