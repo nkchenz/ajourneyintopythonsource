@@ -302,6 +302,13 @@ Lib/cProfile.py ::
 
 cc 为递归除外的调用次数，即4/1中的1。
 
+statprof
+~~~~~~~~~~~~~~
+statprof 提供了另外一种思路，可以参考。每次函数调用都profile代价太高，如果随机抽样部分的函数调用，就可以得到统计意义上的profile数据。具体做法是设置signal.SIGPROF，定时触发profile事件，在处理程序中查看当前堆栈信息，汇总之后就可以看到你的程序大部分时间在做什么。
+
+https://github.com/bos/statprof.py
+
+
 Gevent and Gunicorn
 ----------------------------
 gunicorn: 0.14.2, gevent: 1.0b1
