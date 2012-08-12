@@ -25,38 +25,32 @@ lib的名字应该保持稳定
 
 Lib是一种接口
 
-
-pkg_resources.declare_namespace
--------------------------------------
-
-source code reloading
-----------------------------
-必须有一个dag才行
-
-a.py::
-
-    import b
-    s = str(b.s)
-
-b.py::
-
-    s = "test"
-
-reload b 对a不起作用，严格意义上来讲，a已经不依赖于b，运行中的a已经成功bootstrap，脱离了b。除非生成一个新的a。
-
-这样的依赖关系dag没那么简单，只有清晰定义组件之间的封装接口，才可能做到完整的，在线live的reload。
+Python语法解析
+-------------------
 
 打开文件的几种方法
---------------------
+----------------------
 
-模块和package
-----------------
+package, module, __init__.py
+------------------------------------
+::
 
-怎么判定两个模块是同一个模块
-------------------------------
+    jaime@westeros:~/source/longtalk/lib$ cat __init__.py
+    class Helper:
+        pass
+    jaime@westeros:~/source/longtalk/lib$ cat settings.py
+    import lib.Helper
+    jaime@westeros:~/source/longtalk/lib$ cd ../
+    jaime@westeros:~/source/longtalk$ python -c 'import lib.settings'
+    Traceback (most recent call last):
+      File "<string>", line 1, in <module>
+      File "lib/settings.py", line 1, in <module>
+        import lib.Helper
+    ImportError: No module named Helper
+    jaime@westeros:~/source/longtalk$ 
 
-import 模块导入分析
---------------------------------------
+load files- the last step of importing
+-----------------------------------------------
 如果sys.path[0]是空字符串，则表示查找当前目录。python在搜索模块的时候，会遍历
 sys.path中所有的path，os.path.join(path, module_name)，如果path为'', 则自然
 就是在当前目录查找。
@@ -80,38 +74,31 @@ import语句执行路径
 imp模块是怎么回事
 imp可以实现更灵活的模块导入
 
+source code reloading
+----------------------------
+必须有一个dag才行
+
+a.py::
+
+    import b
+    s = str(b.s)
+
+b.py::
+
+    s = "test"
+
+reload b 对a不起作用，严格意义上来讲，a已经不依赖于b，运行中的a已经成功bootstrap，脱离了b。除非生成一个新的a。
+
+这样的依赖关系dag没那么简单，只有清晰定义组件之间的封装接口，才可能做到完整的，在线live的reload。
 
 logging探秘
 -----------------
-
-__init__.py 在什么时候被执行
---------------------------------
-::
-
-    jaime@westeros:~/source/longtalk/lib$ cat __init__.py
-    class Helper:
-        pass
-    jaime@westeros:~/source/longtalk/lib$ cat settings.py
-    import lib.Helper
-    jaime@westeros:~/source/longtalk/lib$ cd ../
-    jaime@westeros:~/source/longtalk$ python -c 'import lib.settings'
-    Traceback (most recent call last):
-      File "<string>", line 1, in <module>
-      File "lib/settings.py", line 1, in <module>
-        import lib.Helper
-    ImportError: No module named Helper
-    jaime@westeros:~/source/longtalk$ 
-
 
 Py_NewInterpreter
 ----------------------------
 
 Py_Initialize
 --------------
-
-python缩进语法怎么实现
------------------------
-
 
 Python协议
 ----------------
@@ -125,7 +112,6 @@ __repr__
 __next__
 
 动态改变method函数定义的能力
-
 
 setattr在什么情况下不起作用
 -----------------------------
