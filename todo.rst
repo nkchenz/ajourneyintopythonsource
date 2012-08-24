@@ -74,6 +74,13 @@ import语句执行路径
 imp模块是怎么回事
 imp可以实现更灵活的模块导入
 
+tracer.runfunc
+---------------------------
+
+sys.exc_clear, raise statement
+-----------------------------------------
+
+
 source code reloading
 ----------------------------
 必须有一个dag才行
