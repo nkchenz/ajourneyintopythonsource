@@ -77,8 +77,31 @@ imp可以实现更灵活的模块导入
 tracer.runfunc
 ---------------------------
 
-sys.exc_clear, raise statement
+sys.exc_type, raise statement
 -----------------------------------------
+
+sys.exc_type, sys.exc_xxx保存的每个frame捕获的最后一个异常，和当前frame相关，目的
+是便利对异常进行分析，不用把异常传给分析函数。内层frame的异常并不会覆盖外层frame的异常::
+
+    def foo():
+        try:
+            raise IOError
+        except IOError:
+            bar()
+        print sys.exc_type, traceback.format_exc()
+
+如果在bar函数里面也捕获了异常，假设类型位KeyError，那么在bar里面看到的sys.exc_type
+就是KeyError, 而在foo函数中bar返回之后，foo看到的sys.exc_type还是IOError。
+
+如果内层函数没有捕获过异常，则sys.exc_type仍回溯指向上一层的sys.exc_type。
+保存frame为了分析只用
+
+空的语句作用是把sys.exc_type重新抛出。所以如果当前frame内没有捕获到异常，最终抛出的异常
+可能会出乎你的意料。最佳做法是，总是显式的指定raise异常类型。
+
+参考 Python/ceval.c set_exc_info, do_raise 函数的说明。
+
+todo: 异常处理查找机制
 
 
 source code reloading
