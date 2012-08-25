@@ -83,12 +83,38 @@ sys.exc_type, raise statement
 sys.exc_type, sys.exc_xxx保存的每个frame捕获的最后一个异常，和当前frame相关，目的
 是便利对异常进行分析，不用把异常传给分析函数。内层frame的异常并不会覆盖外层frame的异常::
 
+    import sys
+    import traceback
+
     def foo():
         try:
             raise IOError
         except IOError:
-            bar()
-        print sys.exc_type, traceback.format_exc()
+            pass
+        bar()
+        print 'foo', sys.exc_type, traceback.format_exc()
+
+    def bar():
+        try:
+            raise KeyError
+        except KeyError:
+            pass
+        print 'bar', sys.exc_type, traceback.format_exc()
+
+    foo()
+
+::
+
+    09:19 jaime@oldtown ajourneyintopythonsource (master)$ python a.py 
+    bar <type 'exceptions.KeyError'> Traceback (most recent call last):
+      File "a.py", line 14, in bar
+        raise KeyError
+    KeyError
+
+    foo <type 'exceptions.IOError'> Traceback (most recent call last):
+      File "a.py", line 6, in foo
+        raise IOError
+    IOError
 
 如果在bar函数里面也捕获了异常，假设类型位KeyError，那么在bar里面看到的sys.exc_type
 就是KeyError, 而在foo函数中bar返回之后，foo看到的sys.exc_type还是IOError。
