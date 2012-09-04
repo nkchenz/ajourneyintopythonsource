@@ -120,15 +120,59 @@ sys.exc_type, sys.exc_xxx保存的每个frame捕获的最后一个异常，和�
 就是KeyError, 而在foo函数中bar返回之后，foo看到的sys.exc_type还是IOError。
 
 如果内层函数没有捕获过异常，则sys.exc_type仍回溯指向上一层的sys.exc_type。
-保存frame为了分析只用
+保存frame为了分析使用。
 
-空的语句作用是把sys.exc_type重新抛出。所以如果当前frame内没有捕获到异常，最终抛出的异常
+空的raise语句作用是把sys.exc_type重新抛出。所以如果当前frame内没有捕获到异常，最终抛出的异常
 可能会出乎你的意料。最佳做法是，总是显式的指定raise异常类型。
 
 参考 Python/ceval.c set_exc_info, do_raise 函数的说明。
 
-todo: 异常处理查找机制
+既然和frame相关，sys.exc_type就更是线程隔离的，每个线程有自己的异常状态。
 
+Python/errors.c
+~~~~~~~~~~~~~~~~~~~~~~~
+
+设置当前线程异常为type, 抛出异常 ::
+
+    void PyErr_Restore(PyObject *type, PyObject *value, PyObject *traceback)
+
+PyErr_Occurred 判断是否有异常发生，简言之，如果当前线程的tstate->curexc_type不是NULL，
+则python就认为有什么地方抛出异常了。
+
+查看当前异常是否和给定的exc匹配， 用于except语句::
+    
+    void PyErr_ExceptionMatches(PyObject *exc) 
+
+exc是异常class，可以是tuple，即多个class。Note: PyExceptionClass_Check,
+PyObject_IsSubclass.
+
+PyErr_Clear 清空异常信息，让系统认为没有异常发生。
+
+其他都是一些辅助函数，便于抛出异常。NoMemory的异常比较有意思::
+
+    PyObject *
+    PyErr_NoMemory(void)
+    {
+        if (PyErr_ExceptionMatches(PyExc_MemoryError))
+            /* already current */
+            return NULL;
+
+        /* raise the pre-allocated instance if it still exists */
+        if (PyExc_MemoryErrorInst)
+            PyErr_SetObject(PyExc_MemoryError, PyExc_MemoryErrorInst);
+        else
+            /* this will probably fail since there's no memory and hee,
+               hee, we have to instantiate this class
+            */
+            //已经没有内存了，所以只有抛出一个class了事
+            PyErr_SetNone(PyExc_MemoryError);
+
+        return NULL;
+    }
+
+PyErr_NewException 生成新的异常类型？
+
+PyErr_SyntaxLocation?
 
 source code reloading
 ----------------------------
@@ -171,3 +215,14 @@ __next__
 
 setattr在什么情况下不起作用
 -----------------------------
+
+
+python thread
+---------------------
+Python VM指令集
+
+http://docs.python.org/library/dis.html#python-bytecode-instructions
+
+如果线程的实现有Python vm指令支持，想必会好很多，那可以说是真正native的python
+thread。
+
