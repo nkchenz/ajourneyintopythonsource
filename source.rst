@@ -19,7 +19,7 @@ main函数
 
     Modules/python.c main
     Modules/main.c Py_Main # python命令行参数的解析
-    Modules/pythonrun.c Py_Initialize 初始化解释器
+    Python/pythonrun.c Py_Initialize 初始化解释器
 
 
 添加自定义.h或.c文件
