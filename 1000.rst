@@ -1,6 +1,493 @@
 1001 miles
 ============  
 
+Python VM main loop
+---------------------------
+
+Python如何处理Exception
+-----------------------------
+
+自制极简socket模块
+--------------------------------
+socket是python网络通信的主要模块，它实际上只是_socket的一个简单wrap。通过分析_socket模块的
+源码 Modules/socketmodule.c，可以加深对python socket工作原理的理解。
+
+这个文件有5000多行，如果我们只想要最基本的网络功能，建立连接，接收，发送tcp数据，别的
+如ipv6，gethostby*, inet_*等辅助性函数都不需要，也不用考虑平台可移植性，这样一个
+极简的可以工作socket模块会是什么样子呢?
+
+注：本例中的代码几乎全部copy自socketmodule.c
+
+完整代码: https://github.com/nkchenz/cpythonjourney/blob/sockmini/Modules/socketmini.c
+
+_sockmini模块
+~~~~~~~~~~~~~~~~~~
+我们的新模块为_sockmini，将使用一个新的类型sockmini来标识自定义的socket对象， 对应关系:
+_socket -> _sockmini, _socket.socket -> _sockmini.sockmini
+
+新建文件 Modules/socketmini.c::
+
+    static PyMethodDef sockmini_methods[] = {
+        {"setdefaulttimeout",       socket_setdefaulttimeout,
+         METH_O, setdefaulttimeout_doc},
+        {NULL}  /* Sentinel */
+    };
+
+    PyMODINIT_FUNC
+    init_sockmini(void) 
+    {
+        PyObject* m;
+
+        m = Py_InitModule3("_sockmini", sockmini_methods, "sockmini module");
+        if(m == NULL)
+            return;
+
+        /* The general exception type */
+        socket_error = PyErr_NewException("_sockmini.error",
+                                          PyExc_IOError, NULL);
+        if(socket_error == NULL)
+            return;
+        Py_INCREF(socket_error);
+        PyModule_AddObject(m, "error", socket_error);
+     
+        /* Add a new type to module */
+        Py_TYPE(&sockmini_type) = &PyType_Type;
+        Py_INCREF((PyObject *)&sockmini_type);
+        if (PyModule_AddObject(m, "sockmini",
+                               (PyObject *)&sockmini_type) != 0)
+            return;
+    }
+
+
+_sockmini模块只有一个模块级方法socket_setdefaulttimeout，成员error类似于socket.error，用来设置异常，
+另一个成员sockmini就是我们的新socket对象。
+
+sockmini type
+~~~~~~~~~~~~~~~~
+sockmini和socket.socket类型使用同样的存储结构PySocketSockObject，这样很多函数参数的类型
+都可以复用::
+
+    static PyMethodDef sock_methods[] = {
+        {"connect",           (PyCFunction)sock_connect, METH_O,
+                          connect_doc},
+
+        {"close",             (PyCFunction)sock_close, METH_NOARGS,
+                          close_doc},
+        {"recv",              (PyCFunction)sock_recv, METH_VARARGS,
+                          recv_doc},
+        {"send",              (PyCFunction)sock_send, METH_VARARGS,
+                          send_doc},
+        {NULL,                      NULL}           /* sentinel */
+    };
+
+    /* Type object for socket objects. */
+
+    static PyTypeObject sockmini_type = {
+        PyVarObject_HEAD_INIT(0, 0)         /* Must fill in type value later */
+        "_sockmini.sockmini",                           /* tp_name */
+        sizeof(PySocketSockObject),                 /* tp_basicsize */
+        0,                                          /* tp_itemsize */
+        (destructor)sock_dealloc,                   /* tp_dealloc */
+        ...
+        PyObject_GenericGetAttr,                    /* tp_getattro */
+        ...
+        sock_methods,                               /* tp_methods */
+        ...
+        sock_initobj,                               /* tp_init */
+        PyType_GenericAlloc,                        /* tp_alloc */
+        PyType_GenericNew,                          /* tp_new */
+        PyObject_Del,                               /* tp_free */
+    };
+
+sockmini只有四个methods: connect，recv，send，close，底层的c struct是PySocketSockObject，
+初始化函数 sock_initobj, 释放时调用sock_dealloc。
+
+初始化和释放sock object
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+    static int
+    sock_initobj(PyObject *self)
+    {
+        PySocketSockObject *s = (PySocketSockObject *)self;
+        int fd;
+        int family = AF_INET, type = SOCK_STREAM, proto = 0;
+
+        Py_BEGIN_ALLOW_THREADS
+        fd = socket(family, type, proto);
+        Py_END_ALLOW_THREADS
+        if (fd < 0) {
+            PyErr_SetString(socket_error, "Failed to create socket");
+            return -1;
+        }
+
+        s->sock_fd = fd;
+        s->sock_family = family;
+        s->sock_type = type;
+        s->sock_proto = proto;
+
+        /* Notes: Be carefull about the concept of timeout here
+         *
+         *  It only measures the time when a socket becomes ready to read or write, not the time
+         *  took to send or read your data, alas, it's the max idle time spent on waiting,
+         *  not the real busy io time
+         * */
+        s->sock_timeout = defaulttimeout;
+        /* Set to non blocking if timeout is not negative */
+        if (s->sock_timeout >= 0.0)
+            set_blocking(s, 0);
+        return 0;
+    }
+
+family，type，proto使用硬编码，仅支持tcp stream。创建sockmini对象时，默认使用defaulttimeout
+全局变量，该变量可以通过模块函数 _sockmini.setdefaulttimeout 设置。默认值为-1，表示使用blocking fd。
+
+sock_timeout的意义:
+
+- 0.0 non-blocking mode
+- > 0 timeout mode, 底层是non-blocking fd
+- < 0 blocking mode
+
+See http://docs.python.org/2/library/socket.html#socket.socket.settimeout
+
+如果sockmini对象的超时时间>0，则要使用nonblocking的socket fd，这样底层的connect，send，
+recv等c函数才不会一直等待，timeout才有意义。注意，这里的timeout是等待IO变成可用的时间，
+而不是实际执行IO的时间，后面可以详细看到。
+
+sock_dealloc 函数并没有什么修改。
+
+connect, close
+~~~~~~~~~~~~~~~~~~~~~
+_socket模块的getsockaddrarg非常复杂，因为要解析各种各样的协议，而我们的_sockmini只用关心
+tcp，就简单的多了::
+
+    static int
+    getsockaddrarg(PySocketSockObject *s, PyObject *args,
+                   struct sockaddr *addr_ret, int *len_ret)
+    {
+        struct sockaddr_in* addr;
+        char *host;
+        int port, result;
+        struct addrinfo hints, *res;
+        size_t addr_ret_size;
+
+        if (!PyArg_ParseTuple(args, "si:connect", &host, &port))
+            return 0;
+
+        addr=(struct sockaddr_in*)addr_ret;
+
+        /* Getaddrinfo */
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        Py_BEGIN_ALLOW_THREADS
+        result = getaddrinfo(host, NULL, &hints, &res);
+        Py_END_ALLOW_THREADS
+        if (result) {
+            PyErr_SetString(socket_error, "Failed to getaddrinfo ");
+            return 0;
+        }
+
+        addr_ret_size = sizeof(*addr);
+        if (res->ai_addrlen < addr_ret_size)
+            addr_ret_size = res->ai_addrlen;
+        memcpy((char *) addr, res->ai_addr, addr_ret_size);
+        freeaddrinfo(res);
+
+        addr->sin_family = AF_INET;
+        addr->sin_port = htons((short)port);
+        *len_ret = sizeof *addr;
+
+        return 1;
+    }
+
+    /* s.connect(sockaddr) method */
+
+    static PyObject *
+    sock_connect(PySocketSockObject *s, PyObject *args)
+    {
+        sock_addr_t addrbuf;
+        int addrlen;
+        int res, timeout = 0;
+
+        if (!getsockaddrarg(s, args, SAS2SA(&addrbuf), &addrlen))
+            return NULL;
+
+        Py_BEGIN_ALLOW_THREADS
+        res = connect(s->sock_fd, SAS2SA(&addrbuf), addrlen);
+        if (s->sock_timeout > 0.0) {
+            // If timeout is given, use poll to check whether it's ready
+            if (res < 0 && errno == EINPROGRESS) {
+                timeout = poll_check(s, 1);
+                if (timeout == 0) {
+                    /* Bug #1019808: in case of an EINPROGRESS,
+                       use getsockopt(SO_ERROR) to get the real
+                       error. */
+                    socklen_t res_size = sizeof res;
+                    (void)getsockopt(s->sock_fd, SOL_SOCKET,
+                                     SO_ERROR, &res, &res_size);
+                    if (res == EISCONN)
+                        res = 0;
+                    errno = res;
+                }
+                else if (timeout == -1) {
+                    res = errno;            /* had error */
+                }
+            }
+        }
+        Py_END_ALLOW_THREADS
+
+        if (timeout == 1){
+            PyErr_SetString(socket_error, "timed out");
+            return NULL;
+        }
+        if (res != 0)
+            return PyErr_SetFromErrno(socket_error);
+        Py_INCREF(Py_None);
+        return Py_None;
+    }
+
+connect的逻辑是这样的:
+
+- 调用 getsockaddrarg 解析地址
+- 底层connect
+- 如果不是timeout mode，那么底层connect的结果就是我们要的结果
+- 如果超时时间>0，意味着我们在connect一个non-blocking的socket fd，如果成功则一切OK。
+  如果失败，那要看是不是真的失败了，可能只是inprogress，表示连接还在建立中，这时就要
+  调用poll_check，等待连接变为可用再返回。#1019808的意思是，poll在non-blocking fd EINPROGRESS时
+  也有可能返回0，需要特殊处理，查看具体状态。这里的逻辑比较复杂，可能还有问题。
+- 错误处理
+
+sock_close 没有修改。
+
+timeout, poll_check
+~~~~~~~~~~~~~~~~~~~~~~~~~
+poll_check 超时检测，查看fd是否就绪。返回1则表示等待超时，-1错误发生，0 IO就绪或其他。
+
+如果sock对象不处于timeout mode，即sock_timeout<=0.0，则无需检测超时。不执行任何操作，
+立即返回0。只有timeout>0.0时，才会调用系统的poll，等待IO事件发生，该函数返回之后，
+调用者就可以立即操作non-blocking的fd了。
+
+::
+
+    int poll_check(PySocketSockObject *s, int writing)
+    {
+        int n;
+
+        struct pollfd pollfd;
+        int timeout;
+
+        // If in blocking mode, do nothing
+        if (s->sock_timeout <= 0.0)
+            return 0;
+
+        pollfd.fd = s->sock_fd;
+        pollfd.events = writing ? POLLOUT : POLLIN;
+
+        /* s->sock_timeout is in seconds, timeout in ms */
+        timeout = (int)(s->sock_timeout * 1000 + 0.5);
+        n = poll(&pollfd, 1, timeout);
+            
+        /* Returns 1 on timeout, -1 on error, 0 otherwise. */
+        if (n < 0)
+            return -1;
+        if (n == 0){
+            return 1;
+        }
+        return 0;
+    }
+
+send, recv
+~~~~~~~~~~~~~~~~~~
+有了poll_check这个利器之后，真正的发送，接收函数反而比较简单。
+
+sock_send 在发送数据前调用poll_check，非timeout mode下，poll_check什么也不做，一切交由
+后续的send函数处理，blocking的fd有可能可能，non-blocking的fd则不会等待，符合上层的语义。
+
+在timeout mode下，timeout>0.0，则poll_check最多等待timeout时间后返回。如果没超时也没出错
+则为io就绪，后续send会一次发送尽可能多的数据，因为这是non-blocking fd, send不会等待。
+timeout的实现借助non-blocking fd得以完成。需要注意，send发送数据的耗时并没有计算在timeout里，
+timeout的意义仅限于IO等待超时。
+
+当底层的send返回时，进行错误检查，用PyErr_SetFromErrno根据errno设置了合理的异常。
+
+sock_recv 函数的逻辑与此类似。
+
+::
+
+    static PyObject *
+    sock_send(PySocketSockObject *s, PyObject *args)
+    {
+
+        char *buf;
+        int len, n = -1, flags = 0, timeout;
+        Py_buffer pbuf;
+
+        if (!PyArg_ParseTuple(args, "s*|i:send", &pbuf, &flags))
+            return NULL;
+
+        buf = pbuf.buf;
+        len = pbuf.len;
+
+        Py_BEGIN_ALLOW_THREADS
+        timeout = poll_check(s, 1);
+        if (!timeout) // no error and timeout
+            n = send(s->sock_fd, buf, len, flags);
+        Py_END_ALLOW_THREADS
+
+        PyBuffer_Release(&pbuf);
+
+        if (timeout == 1){
+            PyErr_SetString(socket_error, "timed out");
+            return NULL;
+        }
+        if (n < 0)
+            return PyErr_SetFromErrno(socket_error);
+        return PyInt_FromLong((long)n);
+    }
+
+
+    static PyObject *
+    sock_recv(PySocketSockObject *s, PyObject *args)
+    {
+        int recvlen, flags = 0, timeout;
+        ssize_t outlen;
+        PyObject *buf;
+
+        if (!PyArg_ParseTuple(args, "i|i:recv", &recvlen, &flags))
+            return NULL;
+
+        if (recvlen < 0) {
+            PyErr_SetString(PyExc_ValueError,
+                            "negative buffersize in recv");
+            return NULL;
+        }
+
+        /* Allocate a new string. */
+        buf = PyString_FromStringAndSize((char *) 0, recvlen);
+        if (buf == NULL)
+            return NULL;
+
+        Py_BEGIN_ALLOW_THREADS
+        timeout = poll_check(s, 0);
+        if (!timeout) // no error and timeout
+            outlen = recv(s->sock_fd, PyString_AS_STRING(buf), recvlen, flags);
+        Py_END_ALLOW_THREADS
+
+        if (timeout == 1){
+            PyErr_SetString(socket_error, "timed out");
+            return NULL;
+        }
+        if (outlen < 0) {
+            /* An error occurred, release the string and return an
+               error. */
+            Py_DECREF(buf);
+            return PyErr_SetFromErrno(socket_error);
+        }
+        if (outlen != recvlen) {
+            /* We did not read as many bytes as we anticipated, resize the
+               string if possible and be succesful. */
+            if (_PyString_Resize(&buf, outlen) < 0)
+                /* Oopsy, not so succesful after all. */
+                return NULL;
+        }
+
+        return buf;
+    }
+
+注意，当send写入0个字节，recv读取到空字符串时，不一定表示错误。
+
+综合下来，其实整个模块复杂的地方就在于对timeout的处理，其他都是对socket c编程的直接封装。
+
+编译设置
+~~~~~~~~~~~~~
+修改setup.py，告诉make编译我们的_sockmini模块::
+
+    diff --git a/setup.py b/setup.py
+    index 6e02114..76b6afd 100644
+    --- a/setup.py
+    +++ b/setup.py
+    @@ -689,6 +689,9 @@ class PyBuildExt(build_ext):
+             # socket(2)
+             exts.append( Extension('_socket', ['socketmodule.c'],
+                                    depends = ['socketmodule.h']) )
+    +        exts.append( Extension('_sockmini', ['socketmini.c'],
+    +                               depends = ['socketmodule.h']) )
+    +
+             # Detect SSL support for the socket module (via _ssl)
+             search_for_ssl_incs_in = [
+                                   '/usr/local/ssl/include',
+
+make ::
+
+    13:59 jaime@oldtown 2.6.7 (sockmini)$ make
+    running build
+    running build_ext
+    building '_sockmini' extension
+    gcc -fno-strict-aliasing -g -O2 -DNDEBUG -g -fwrapv -O3 -Wall -Wstrict-prototypes -I. -I/Users/jaime/source/2.6.7/./Include -I/Users/jaime/source/2.6.7/./Mac/Include -I. -IInclude -I./Include -I/usr/local/include -I/Users/jaime/source/2.6.7/Include -I/Users/jaime/source/2.6.7 -c /Users/jaime/source/2.6.7/Modules/socketmini.c -o build/temp.macosx-10.4-x86_64-2.6/Users/jaime/source/2.6.7/Modules/socketmini.o
+    /Users/jaime/source/2.6.7/Modules/socketmini.c:389: warning: initialization from incompatible pointer type
+    /Users/jaime/source/2.6.7/Modules/socketmodule.h:228: warning: ‘PySocketModule_ImportModuleAndAPI’ defined but not used
+    gcc -bundle -undefined dynamic_lookup build/temp.macosx-10.4-x86_64-2.6/Users/jaime/source/2.6.7/Modules/socketmini.o -L/usr/local/lib -o build/lib.macosx-10.4-x86_64-2.6/_sockmini.so
+
+    ...
+
+    running build_scripts
+    13:59 jaime@oldtown 2.6.7 (sockmini)$ 
+
+测试代码
+~~~~~~~~~~~~
+::
+
+    #import _socket as _sockmini
+    #from _socket import socket as sockmini
+
+    import _sockmini
+    from _sockmini import sockmini
+
+    _sockmini.setdefaulttimeout(3)
+
+    s = sockmini()
+    s.connect(('www.google.com', 80))
+    #s.connect(('www.github.com', 80))
+    #s.connect(('www.douban.com', 80))
+    s.send('GET / HTTP/1.1\n\n')
+    data = ''
+    while 1:
+        tmp = s.recv(4096)
+        print '-', len(tmp), tmp
+        if not tmp:
+            break
+        data += tmp
+    print data
+
+
+运行输出::
+
+    10:41 jaime@oldtown 2.6.7 (sockmini)$ ./python.exe tests/test_sockmini.py 
+    - 1279 HTTP/1.1 302 Found
+      Location:
+      http://www.google.com.hk/url?sa=p&hl=zh-CN&pref=hkredirect&pval=yes&q=http://www.google.com.hk/&ust=1353811295390764&usg=AFQjCNGq9Gh7aZ15wEgee3rdzZBwbYxXUQ
+      Cache-Control: private
+      Content-Type: text/html; charset=UTF-8
+      Set-Cookie:
+      PREF=ID=1adfb854d08d14e0:FF=0:NW=1:TM=1353811265:LM=1353811265:S=XEogFSHieh_DmFUd;
+      ...
+      Server: gws
+      Content-Length: 376
+      X-XSS-Protection: 1; mode=block
+      X-Frame-Options: SAMEORIGIN
+
+    <HTML><HEAD><meta http-equiv="content-type" content="text/html;charset=utf-8">
+    <TITLE>302 Moved</TITLE></HEAD><BODY>
+    <H1>302 Moved</H1>
+    The document has moved
+    <A
+    HREF="http://www.google.com.hk/url?sa=p&amp;hl=zh-CN&amp;pref=hkredirect&amp;pval=yes&amp;q=http://www.google.com.hk/&amp;ust=1353811295390764&amp;usg=AFQjCNGq9Gh7aZ15wEgee3rdzZBwbYxXUQ">here</A>.
+    </BODY></HTML>
+
+Notes
+~~~~~~~~~~
+虽然比较简陋，而且可能还有很多问题，但是我们确实有了一个可以工作的socket模块，it's funny
+
 cProfile
 --------------
 
@@ -433,7 +920,7 @@ pre_request, post_request钩子，具体wsgi执行都在 handle_request中。
     
     application即为你的wsgi callable，handler_class则是gevent.pywsgi.WSGIHandler。        
 
-OK, 继续看server.start的流程：
+OK, 继续看server.start的流程::
 
     gevent.server.StreamServer.start
     gevent.server.BaseServer.start
