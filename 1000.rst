@@ -1,11 +1,300 @@
 1001 miles
 ============  
 
-Python VM main loop
+The Big Loop
 ---------------------------
 
-Python如何处理Exception
+基于frame的vm，而不是想象中的结构:
+
+VM:
+    init
+    for inst in instructions:
+        run inst
+
+
+FrameVM:
+    init frame
+    for inst in framecode:
+        if inst is newframe:
+            FrameVM inst
+        else:
+            run inst
+
+Life of Exception
 -----------------------------
+先来看一段程序::
+
+    import sys
+    import traceback
+
+    def foo():
+        print 'calling bar'
+        bar()
+        try:
+            raise IOError
+        except IOError:
+            print 'calling bar in exception handler'
+            bar()
+        # All exceptions cleared, how to tell if there is exception or not
+        print 'foo', sys.exc_type, traceback.format_exc()
+
+    def bar():
+        print 'bar1', sys.exc_type, traceback.format_exc()
+        try:
+            zoo()
+        except KeyError:
+            pass
+        print 'bar2', sys.exc_type, traceback.format_exc()
+
+    def zoo():
+        print 'happy in zoo'
+        raise KeyError
+        print 'bye'
+
+    foo()
+
+输出::
+
+    20:56 jaime@oldtown ajourneyintopythonsource (master)$ python a.py 
+    calling bar
+    bar1 None None
+
+    happy in zoo
+    bar2 <type 'exceptions.KeyError'> Traceback (most recent call last):
+      File "a.py", line 18, in bar
+        zoo()
+      File "a.py", line 25, in zoo
+        raise KeyError
+    KeyError
+
+    calling bar in exception handler
+    bar1 <type 'exceptions.IOError'> Traceback (most recent call last):
+      File "a.py", line 8, in foo
+        raise IOError
+    IOError
+
+    happy in zoo
+    bar2 <type 'exceptions.KeyError'> Traceback (most recent call last):
+      File "a.py", line 18, in bar
+        zoo()
+      File "a.py", line 25, in zoo
+        raise KeyError
+    KeyError
+
+    foo <type 'exceptions.IOError'> Traceback (most recent call last):
+      File "a.py", line 8, in foo
+        raise IOError
+    IOError
+
+    20:56 jaime@oldtown ajourneyintopythonsource (master)$ 
+
+本节主要关注几个问题:
+
+VM怎么知道有异常发生了？
+
+VM怎么找到异常处理handler, 怎样一步步向上抛出直到被捕获的？找到之后又怎么处理呢？
+
+sys.exc_type和frame是什么关系?
+
+从输出看来，sys.exc_type保存的是当前frame的上一个异常。bar中的KeyError异常，并不会覆盖调用者foo
+看到的sys.exc_type IOError。sys.exc_type并不是全局的，而是和frame相关的，当bar执行完毕之后返回foo之后，
+sys.exc_type被重新恢复成foo原来的IOError了。
+
+而从bar1的输出可以知道，如果当前frame还没有抛出过异常，此时sys.exc_type和上一个frame即foo中的值一样。
+
+带着这几个问题，让我们开始深入代码。
+
+sys.exc_type, tstate->exc_type, frame->f_exc_type
+---------------------------------------------------------
+为了理解exception的工作原理，要分清以下三个变量，Python/ceval.c中解释的比较详细：
+
+tstate->exc_type, sys.exc_type 线程运行过程中的异常状态，在每次发生异常时都被设置。但是为了便于
+编写代码，它们被设计成和frame相关的。如果一个frame中改变了这些值，在该frame退出时，VM需要恢复它们的
+状态。
+
+frame->f_exc_type 恢复机制的关键所在，在frame发生第一个异常时，保存当时的状态，即tstate->exc_type值。
+在frame退出时，如果保存过，则用该值进行恢复。在set_exc_info中仅被设置一次，如果后续该frame再多次调用
+set_exc_info，已经不为null了，所以不会被新的值冲掉。
+
+当frame被释放时，如果frame->f_exc_type不为null，则说明发生过异常，这时会调用reset_exc_info，将此前
+保存的frame->f_exc_type恢复为tstate->exc_type和sys.exc_type，相当于这两个值都恢复到了该frame发生
+第一次异常前的状态。这可以解释sys.exc_type在bar退出后，为什么又变回IOError了。
+
+如果frame中没有发生过异常，没有调用过set_exc_info，frame->f_exc_type会一直是null，
+tstate->exc_type, sys.exc_type保持不变，当frame释放时，也就不需要恢复，不需要调用reset_exc_info，
+所以后者有frame->f_exc_type!=null的assert。如果连着多层frames都没有发生过异常，则sys.exc_type会一直
+保留为上溯到发生过异常那层frame的值，如果所有的上层frame栈都没有异常，则为None。
+
+当frame中有多次异常时，每次调用set_exc_info都将tstate->exc_type, sys.exc_type设为最新值，这就是
+为什么说它们是反映运行时异常状态的。
+
+raise
+-------------------
+在python代码中，可以使用raise语句来显式抛出异常，使用说明 
+http://docs.python.org/2/reference/simple_stmts.html#the-raise-statement
+
+python vm在执行指令时，或者python代码调用的c函数，也会抛出异常，通过调用C/API实现。
+还有一种异常
+
+RAISE_VARARGS指令解析
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+raise语句被翻译为 RAISE_VARARGS 指令，其解析代码如下 Python/ceval.c::
+
+        case RAISE_VARARGS:
+            u = v = w = NULL;
+            switch (oparg) {
+            case 3:
+                u = POP(); /* traceback */
+                /* Fallthrough */
+            case 2:
+                v = POP(); /* value */
+                /* Fallthrough */
+            case 1:
+                w = POP(); /* exc */
+            case 0: /* Fallthrough */
+                why = do_raise(w, v, u);
+                break;
+            default:
+                PyErr_SetString(PyExc_SystemError,
+                           "bad RAISE_VARARGS oparg");
+                why = WHY_EXCEPTION;
+                break;
+            }
+            break;
+
+利用case的默认fallthrough，来处理不同的参数情况，相当精巧。如果参数错误，则抛出异常，这里的PyErr_SetString
+是python vm自身抛出异常的一个例子。
+
+do_raise::
+
+    /* Logic for the raise statement (too complicated for inlining).
+       This *consumes* a reference count to each of its arguments. */
+    static enum why_code
+    do_raise(PyObject *type, PyObject *value, PyObject *tb)
+    {
+        if (type == NULL) {
+            /* Reraise */
+            PyThreadState *tstate = PyThreadState_GET();
+            type = tstate->exc_type == NULL ? Py_None : tstate->exc_type;
+            value = tstate->exc_value;
+            tb = tstate->exc_traceback;
+            Py_XINCREF(type);
+            Py_XINCREF(value);
+            Py_XINCREF(tb);
+        }
+
+        /* We support the following forms of raise:
+           raise <class>, <classinstance>
+           raise <class>, <argument tuple>
+           raise <class>, None
+           raise <class>, <argument>
+           raise <classinstance>, None
+           raise <string>, <object>
+           raise <string>, None
+
+        /* 一大堆raise的复杂逻辑，将各种参数类型最后统一成type, value, tb*/
+        ...
+
+        PyErr_Restore(type, value, tb);
+        if (tb == NULL)
+            return WHY_EXCEPTION;
+        else
+            return WHY_RERAISE;
+     raise_error:
+        Py_XDECREF(value);
+        Py_XDECREF(type);
+        Py_XDECREF(tb);
+        return WHY_EXCEPTION;
+    }
+
+do_raise的返回值只有WHY_EXCEPTION, WHY_RERAISE，vm通过这个why，就知道有异常发生了。
+
+设置异常信息
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+具体设置异常信息在 PyErr_Restore Python/errors.c::
+
+    void
+    PyErr_Restore(PyObject *type, PyObject *value, PyObject *traceback)
+    {
+        PyThreadState *tstate = PyThreadState_GET();
+        PyObject *oldtype, *oldvalue, *oldtraceback;
+
+        if (traceback != NULL && !PyTraceBack_Check(traceback)) {
+            /* XXX Should never happen -- fatal error instead? */
+            /* Well, it could be None. */
+            Py_DECREF(traceback);
+            traceback = NULL;
+        }
+
+        /* Save these in locals to safeguard against recursive
+           invocation through Py_XDECREF */
+        oldtype = tstate->curexc_type;
+        oldvalue = tstate->curexc_value;
+        oldtraceback = tstate->curexc_traceback;
+
+        tstate->curexc_type = type;
+        tstate->curexc_value = value;
+        tstate->curexc_traceback = traceback;
+
+        Py_XDECREF(oldtype);
+        Py_XDECREF(oldvalue);
+        Py_XDECREF(oldtraceback);
+    }
+
+设置了tstate->curexc_type，而不是tstate->exc_type，才明白，原来当前线程的异常信息都是存在
+前者里的，后者tstate->exc_type, 和sys.exc_type，只是为了方便在except的handler中拿到本frame的
+异常信息之用。不然如果sys.exc_type不是frame相关的，如果handler自身也有异常，就会冲掉原来的异常。
+当然除非你用except Exception, e的方法先保存下这个e。
+
+由于任何时候都只有一个异常在被处理: 1. 查找handler中(只能有一个查找)，2. 执行handler中(相当于已被处理，
+如果再有异常则goto 1)，所以用一个变量tstate->curexc_type来存储当前异常信息，是合理的。
+
+相应读取当前异常信息的PyErr_Occurred就简单多了::
+
+    PyObject *
+    PyErr_Occurred(void)
+    {
+        PyThreadState *tstate = PyThreadState_GET();
+
+        return tstate->curexc_type;
+    }
+
+判断是否有异常发生，简言之，如果当前线程的tstate->curexc_type 不是NULL，则python就认为有什么地方抛出异常了。
+
+查看当前异常是否匹配某个异常exc PyErr_ExceptionMatches
+
+清空异常信息 PyErr_Clear，将tstate->curexc_type设为null， 让系统认为没有异常发生。
+
+NoMemory的异常比较有意思::
+
+    PyObject *
+    PyErr_NoMemory(void)
+    {
+        if (PyErr_ExceptionMatches(PyExc_MemoryError))
+            /* already current */
+            return NULL;
+
+        /* raise the pre-allocated instance if it still exists */
+        if (PyExc_MemoryErrorInst)
+            PyErr_SetObject(PyExc_MemoryError, PyExc_MemoryErrorInst);
+        else
+            /* this will probably fail since there's no memory and hee,
+               hee, we have to instantiate this class
+            */
+            //已经没有内存了，所以只有抛出一个class了事
+            PyErr_SetNone(PyExc_MemoryError);
+
+        return NULL;
+    }
+
+VM感知异常发生
+~~~~~~~~~~~~~~~~~~~~~
+
+
+except
+----------------
+异常发生了！Don't panic，我们有except。
+
 
 自制极简socket模块
 --------------------------------
