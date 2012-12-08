@@ -1,0 +1,30 @@
+1718 Miles
+==================
+
+The Big Loop
+---------------------------
+
+基于frame的vm，而不是想象中的结构:
+
+VM:
+    init
+    for inst in instructions:
+        run inst
+
+
+FrameVM:
+    init frame
+    for inst in framecode:
+        if inst is newframe:
+            FrameVM inst
+        else:
+            run inst
+
+#define STACK_LEVEL()     ((int)(stack_pointer - f->f_valuestack))
+#define EMPTY()           (STACK_LEVEL() == 0)
+
+frame 结构中存有当前的堆栈信息
+
+遇到块结束的指令，调用 break
+其他指令则调用 continue，没有检查错误，也不用退出block，直接执行下一条指令
+

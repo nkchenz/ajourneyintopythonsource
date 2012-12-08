@@ -1,25 +1,5 @@
 1001 miles
 ============  
-
-The Big Loop
----------------------------
-
-基于frame的vm，而不是想象中的结构:
-
-VM:
-    init
-    for inst in instructions:
-        run inst
-
-
-FrameVM:
-    init frame
-    for inst in framecode:
-        if inst is newframe:
-            FrameVM inst
-        else:
-            run inst
-
 Life of Exception
 -----------------------------
 先来看一段程序::
@@ -105,7 +85,7 @@ sys.exc_type被重新恢复成foo原来的IOError了。
 带着这几个问题，让我们开始深入代码。
 
 sys.exc_type, tstate->exc_type, frame->f_exc_type
----------------------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 为了理解exception的工作原理，要分清以下三个变量，Python/ceval.c中解释的比较详细：
 
 tstate->exc_type, sys.exc_type 线程运行过程中的异常状态，在每次发生异常时都被设置。但是为了便于
@@ -129,7 +109,7 @@ tstate->exc_type, sys.exc_type保持不变，当frame释放时，也就不需要
 为什么说它们是反映运行时异常状态的。
 
 raise
--------------------
+~~~~~~~~~~~~~~~~~~~~~~
 在python代码中，可以使用raise语句来显式抛出异常，使用说明 
 http://docs.python.org/2/reference/simple_stmts.html#the-raise-statement
 
@@ -137,7 +117,7 @@ python vm在执行指令时，或者python代码调用的c函数，也会抛出�
 还有一种异常
 
 RAISE_VARARGS指令解析
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 raise语句被翻译为 RAISE_VARARGS 指令，其解析代码如下 Python/ceval.c::
 
         case RAISE_VARARGS:
@@ -210,7 +190,7 @@ do_raise::
 do_raise的返回值只有WHY_EXCEPTION, WHY_RERAISE，vm通过这个why，就知道有异常发生了。
 
 设置异常信息
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^
 具体设置异常信息在 PyErr_Restore Python/errors.c::
 
     void
@@ -288,13 +268,319 @@ NoMemory的异常比较有意思::
     }
 
 VM感知异常发生
-~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^
+现在的情况是，执行到了raise语句，或者其他指令，函数执行过程中，发生了异常，异常信息
+已经被记录到tstate->curexc_type，但是vm的主循环怎么感知到这个异常并启动处理机制呢？
 
+RAISE_VARARGS 设置了why之后，就break掉指令解析switch结构，跳转到on_error label了。
+
+why::
+
+    /* Status code for main loop (reason for stack unwind) */
+    enum why_code {
+            WHY_NOT =       0x0001, /* No error */
+            WHY_EXCEPTION = 0x0002, /* Exception occurred */
+            WHY_RERAISE =   0x0004, /* Exception re-raised by 'finally' */
+            WHY_RETURN =    0x0008, /* 'return' statement */
+            WHY_BREAK =     0x0010, /* 'break' statement */
+            WHY_CONTINUE =  0x0020, /* 'continue' statement */
+            WHY_YIELD =     0x0040  /* 'yield' operator */
+    };
+
+指令善后处理 on_error::
+
+            on_error:
+
+                    READ_TIMESTAMP(inst1);
+
+                    /* Quickly continue if no error occurred */
+
+                    if (why == WHY_NOT) {
+                        if (err == 0 && x != NULL) {
+                        // 调用PyErr_Occurred再检测一次，看是否真的没有错误
+                        // CHECKEXC 主要是为了防止vm自身实现错误导致的意外情况
+                        // Q: 本次exception处理完之后，是什么时候调用PyErr_Clear的？
+            #ifdef CHECKEXC
+                            /* This check is expensive! */
+                            if (PyErr_Occurred())
+                                fprintf(stderr,
+                                    "XXX undetected error\n");
+                            else {
+            #endif
+                                READ_TIMESTAMP(loop1);
+                                continue; /* Normal, fast path */
+            #ifdef CHECKEXC
+                            }
+            #endif
+                        }
+                        // err 不为0，或者指令运算结果x为NULL
+                        // 这应该是很多c扩展模块里面返回NULL就会抛出异常的原理
+                        why = WHY_EXCEPTION;
+                        x = Py_None;
+                        err = 0;
+                    }
+
+                    /* Double-check exception status */
+
+                    if (why == WHY_EXCEPTION || why == WHY_RERAISE) {
+                        if (!PyErr_Occurred()) {
+                            // 设置了why，但是却没有异常信息
+                            PyErr_SetString(PyExc_SystemError,
+                                "error return without exception set");
+                            why = WHY_EXCEPTION;
+                        }
+                    }
+            #ifdef CHECKEXC
+                    else {
+                        // 没有设置why，却有异常信息
+                        ...
+                    }
+            #endif
+
+                    /* Log traceback info if this is a real exception */
+                    ...
+
+
+                    /* For the rest, treat WHY_RERAISE as WHY_EXCEPTION */
+
+                    if (why == WHY_RERAISE)
+                        why = WHY_EXCEPTION;
+
+
+好的，VM对why的处理到此结束，下面就开始寻找except handler了，对堆栈进行复杂的操作，
+不停的回溯frame，直到遇到一个except语句为止。
 
 except
-----------------
-异常发生了！Don't panic，我们有except。
+~~~~~~~~~~~~~~~~~~~
+异常！异常！Don't panic，我们有except。
 
+异常处理指令
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+try..except..finally对应的vm指令::
+
+    10:07 jaime@oldtown ajourneyintopythonsource (master)$ cat e.py
+
+
+    def foo():
+        raise IOError
+
+    try:
+        a = 1
+        foo()
+    except IOError:
+        print 'IOError'
+    finally:
+        print 'Finally'
+
+    a = 2
+    10:26 jaime@oldtown ajourneyintopythonsource (master)$ 
+
+
+    10:07 jaime@oldtown ajourneyintopythonsource (master)$ python -m dis e.py 
+      3           0 LOAD_CONST               0 (<code object foo at 0x1006f56b0, file "e.py", line 3>)
+                  3 MAKE_FUNCTION            0
+                  6 STORE_NAME               0 (foo)
+
+      6           9 SETUP_FINALLY           46 (to 58)
+                 12 SETUP_EXCEPT            17 (to 32)
+
+      7          15 LOAD_CONST               1 (1)
+                 18 STORE_NAME               1 (a)
+
+      8          21 LOAD_NAME                0 (foo)
+                 24 CALL_FUNCTION            0
+                 27 POP_TOP             
+                 28 POP_BLOCK           
+                 29 JUMP_FORWARD            22 (to 54)
+
+      9     >>   32 DUP_TOP             
+                 33 LOAD_NAME                2 (IOError)
+                 36 COMPARE_OP              10 (exception match)
+                 39 POP_JUMP_IF_FALSE       53
+                 42 POP_TOP             
+                 43 POP_TOP             
+                 44 POP_TOP             
+
+     10          45 LOAD_CONST               2 ('IOError')
+                 48 PRINT_ITEM          
+                 49 PRINT_NEWLINE       
+                 50 JUMP_FORWARD             1 (to 54)
+            >>   53 END_FINALLY         
+            >>   54 POP_BLOCK           
+                 55 LOAD_CONST               3 (None)
+
+     12     >>   58 LOAD_CONST               4 ('Finally')
+                 61 PRINT_ITEM          
+                 62 PRINT_NEWLINE       
+                 63 END_FINALLY         
+
+     14          64 LOAD_CONST               5 (2)
+                 67 STORE_NAME               1 (a)
+                 70 LOAD_CONST               3 (None)
+                 73 RETURN_VALUE        
+
+SETUP_EXCEPT，SETUP_FINALLY: 初始化try block，记录except，finally的地址
+
+指令24 CALL_FUNCTION调用函数foo，如果没有异常，指令29直接跳转到54执行finally。
+
+如果有异常，则指令24返回的时候，确切的说是foo函数的raise语句执行完之后，python vm就会启动异常处理机制，
+找到SETUP_EXCEPT记录的except地址32，调整堆栈，跳转到这里执行。注意，这个跳转是vm自动完成的，并没有对应的
+指令，这一部分的介绍见下节。
+
+进入handler之后，如果except匹配，则执行完处理语句后，指令50直接跳转到指令54执行finally。
+如果异常不匹配，指令39跳转到指令53，比匹配的情况多执行了一个END_FINALLY，reraise异常，
+即该异常也算被handle过了，只不过这个handle因为不匹配，选择重新抛出了异常::
+
+    case END_FINALLY:
+            v = POP();
+            if (PyInt_Check(v)) {
+            ...
+            }
+            else if (PyExceptionClass_Check(v) ||
+                     PyString_Check(v)) {
+                w = POP();
+                u = POP();
+                PyErr_Restore(v, w, u);
+                why = WHY_RERAISE;
+                break;
+            }
+            ...
+            Py_DECREF(v);
+            break;
+
+指令53执行完后，也执行了finally部分代码。可见，python vm生成的try block handler编译码，
+保证了不管在什么情况下，finally都会得到执行。
+
+如果try有多个except语句，也和此类似，实际上try的handler只有一个，多个except只是
+对应于该handler里的多个条件判断。SETUP_EXCEPT指令只记录第一个except的跳转地址。
+
+如果try没有except语句，那么就不会有SETUP_EXCEPT指令，而只有一个SETUP_FINALLY指令，
+finally的代码既是该block的handler。
+
+寻找handler
+^^^^^^^^^^^^^^^^^^^^^
+::
+
+            /* Unwind stacks if a (pseudo) exception occurred */
+
+            /* block结束处理。Q: 有那些情况会生成一个新的block？
+            exception是一种特殊的block，先在本frame的所有blocks里面寻找handler，
+            如果没有找到，则退出本frame，到上一层frame里面继续寻找。frame的退出通常意味着函数的返回，
+            即CALL_FUNCTION指令的返回，在上一层frame里面，又会继续走到这段代码。
+            */
+
+            fast_block_end:
+                    // 逐层向上回溯block。Q: Block, Frame有什么区别？
+                    while (why != WHY_NOT && f->f_iblock > 0) {
+
+                        // 获得上一层block，循环迭代器
+                        PyTryBlock *b = PyFrame_BlockPop(f);
+
+                        assert(why != WHY_YIELD);
+                        // continue语句
+                        if (b->b_type == SETUP_LOOP && why == WHY_CONTINUE) {
+                            /* For a continue inside a try block,
+                               don't pop the block for the loop. */
+                            PyFrame_BlockSetup(f, b->b_type, b->b_handler,
+                                               b->b_level);
+                            why = WHY_NOT;
+                            JUMPTO(PyInt_AS_LONG(retval));
+                            Py_DECREF(retval);
+                            break;
+                        }
+
+                        // 清除堆栈
+                        while (STACK_LEVEL() > b->b_level) {
+                            v = POP();
+                            Py_XDECREF(v);
+                        }
+                        // break语句
+                        if (b->b_type == SETUP_LOOP && why == WHY_BREAK) {
+                            why = WHY_NOT;
+                            JUMPTO(b->b_handler);
+                            break;
+                        }
+
+                        // Good, 找到最近一层try..except..block块了
+                        if (b->b_type == SETUP_FINALLY || // 对应于没有except只有finally的情况，finally必须得到执行
+                            (b->b_type == SETUP_EXCEPT &&
+                             why == WHY_EXCEPTION)) {
+                            if (why == WHY_EXCEPTION) {
+                                PyObject *exc, *val, *tb;
+                                PyErr_Fetch(&exc, &val, &tb);
+                                if (val == NULL) {
+                                    val = Py_None;
+                                    Py_INCREF(val);
+                                }
+                                /* Make the raw exception data
+                                   available to the handler,
+                                   so a program can emulate the
+                                   Python main loop.  Don't do
+                                   this for 'finally'. */
+
+                                // 设置 tstate->exc_type, sys.exc_type
+                                if (b->b_type == SETUP_EXCEPT) {
+                                    PyErr_NormalizeException(
+                                        &exc, &val, &tb);
+                                    set_exc_info(tstate,
+                                                 exc, val, tb);
+                                }
+                                // 把异常信息压入堆栈，为执行except handler做准备
+                                // 对应于上面反汇编后 42, 43, 44 三个POP指令
+                                if (tb == NULL) {
+                                    Py_INCREF(Py_None);
+                                    PUSH(Py_None);
+                                } else
+                                    PUSH(tb);
+                                PUSH(val);
+                                PUSH(exc);
+                            }
+                            else {
+                            // 函数返回的情况
+                                if (why & (WHY_RETURN | WHY_CONTINUE))
+                                    PUSH(retval);
+                                v = PyInt_FromLong((long)why);
+                                PUSH(v);
+                            }
+                            /* 跳转到block的handler，即except handler
+                            注意why已经变为WHY_NOT了，意味着异常处理handler已经找到了
+                            至于是否匹配则交由python层去解决。还记得上面吗？如果没匹配，会执行
+                            END_FINALLY重新raise异常*/
+                            why = WHY_NOT;
+                            JUMPTO(b->b_handler);
+                            break;
+                        }
+                    } /* unwind stack */
+
+                    /* End the loop if we still have an error (or return) */
+
+                    // 在本frame里面没有找到handler，结束loop，退出本frame执行
+                    if (why != WHY_NOT)
+                        break;
+                    READ_TIMESTAMP(loop1);
+
+                } /* main loop */ //指令解析for loop
+
+                ...
+
+                // frame结束的时候，恢复tstate->exc_type, sys.exc_type
+                if (tstate->frame->f_exc_type != NULL)
+                    reset_exc_info(tstate);
+                else {
+                    assert(tstate->frame->f_exc_value == NULL);
+                    assert(tstate->frame->f_exc_traceback == NULL);
+                }
+
+                /* pop frame */
+            exit_eval_frame:
+                Py_LeaveRecursiveCall();
+                tstate->frame = f->f_back;
+
+                return retval;
+            }
+
+最后一个问题，进入handler之后，已经恢复了正常的指令执行流程，下一条指令执行的时候，不希望PyErr_Occurred
+仍返回true，那么 tstate->curexc_type是在什么时候被清空的呢？
 
 自制极简socket模块
 --------------------------------
