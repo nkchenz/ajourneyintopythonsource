@@ -114,7 +114,6 @@ raise
 http://docs.python.org/2/reference/simple_stmts.html#the-raise-statement
 
 python vm在执行指令时，或者python代码调用的c函数，也会抛出异常，通过调用C/API实现。
-还有一种异常
 
 RAISE_VARARGS指令解析
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -579,8 +578,27 @@ finally的代码既是该block的handler。
                 return retval;
             }
 
-最后一个问题，进入handler之后，已经恢复了正常的指令执行流程，下一条指令执行的时候，不希望PyErr_Occurred
-仍返回true，那么 tstate->curexc_type是在什么时候被清空的呢？
+至此，你也许还有一个疑问，tstate->curexc_type是不是没有清掉？进入handler之后，已经恢复了正常的
+指令执行流程，下一条指令执行的时候，PyErr_Occurred肯定不能返回true，这个问题不解决，就像有个东西
+一直在hunting你，让你坐立不安。
+
+看看 PyErr_Fetch 吧，Python/errors.c::
+
+    void
+    PyErr_Fetch(PyObject **p_type, PyObject **p_value, PyObject **p_traceback)
+    {
+        PyThreadState *tstate = PyThreadState_GET();
+
+        *p_type = tstate->curexc_type;
+        *p_value = tstate->curexc_value;
+        *p_traceback = tstate->curexc_traceback;
+
+        tstate->curexc_type = NULL;
+        tstate->curexc_value = NULL;
+        tstate->curexc_traceback = NULL;
+    }
+
+世界安静了，一切都在恰当的位置。
 
 自制极简socket模块
 --------------------------------
