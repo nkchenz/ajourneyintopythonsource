@@ -1,6 +1,14 @@
 1718 Miles
 ==================
 
+FrameTimer
+-----------------
+对一个frame设置timer，如果到时仍未退出，则抛出异常
+在线程B中如果检查线程A设置的timer？触发线程切换并抛出异常
+怎么解决c扩展执行时间过长的问题？进入c函数前设置一个alarm，timer信号？
+
+http://eli.thegreenplace.net/2011/08/22/how-not-to-set-a-timeout-on-a-computation-in-python/#id5
+
 The Big Loop
 ---------------------------
 
@@ -27,4 +35,214 @@ frame 结构中存有当前的堆栈信息
 
 遇到块结束的指令，调用 break
 其他指令则调用 continue，没有检查错误，也不用退出block，直接执行下一条指令
+
+
+Python VM 指令集构成
+--------------------------
+
+http://docs.python.org/2/library/dis.html#python-bytecode-instructions
+
+Python VM指令可以分为以下几大类。
+
+堆栈操作
+~~~~~~~~~~~~~~~
+::
+
+    POP_TOP
+    ROT_TWO
+    ROT_THREE
+    DUP_TOP
+    ROT_FOUR
+    DUP_TOPX
+
+空操作
+~~~~~~~~~~~~
+::
+
+    NOP
+
+算术操作
+~~~~~~~~~~~~~
+::
+
+    UNARY_POSITIVE
+    UNARY_NEGATIVE
+    UNARY_NOT
+    UNARY_CONVERT
+    UNARY_INVERT
+    BINARY_POWER
+    BINARY_MULTIPLY
+    BINARY_DIVIDE
+    BINARY_MODULO
+    BINARY_ADD
+    BINARY_SUBTRACT
+    BINARY_SUBSCR
+    BINARY_FLOOR_DIVIDE
+    BINARY_TRUE_DIVIDE
+    INPLACE_FLOOR_DIVIDE
+    INPLACE_TRUE_DIVIDE
+    INPLACE_ADD
+    INPLACE_SUBTRACT
+    INPLACE_MULTIPLY
+    INPLACE_DIVIDE
+    INPLACE_MODULO
+    INPLACE_POWER
+
+逻辑操作
+~~~~~~~~~~~~~~~~
+::
+
+    BINARY_LSHIFT
+    BINARY_RSHIFT
+    BINARY_AND
+    BINARY_XOR
+    BINARY_OR
+    INPLACE_LSHIFT
+    INPLACE_RSHIFT
+    INPLACE_AND
+    INPLACE_XOR
+    INPLACE_OR
+
+数据类型支持
+~~~~~~~~~~~~~~~~~
+List操作
+^^^^^^^^^^^^^^
+::
+
+    LIST_APPEND
+    SLICE+0
+    SLICE+1
+    SLICE+2
+    SLICE+3
+    STORE_SLICE+0
+    STORE_SLICE+1
+    STORE_SLICE+2
+    STORE_SLICE+3
+
+    DELETE_SLICE+0
+    DELETE_SLICE+1
+    DELETE_SLICE+2
+    DELETE_SLICE+3
+    BUILD_SLICE
+
+    BUILD_LIST
+
+Tuple指令
+^^^^^^^^^^^^^^
+::
+
+    BUILD_TUPLE
+    UNPACK_SEQUENCE
+
+Dict操作
+^^^^^^^^^^^^
+::
+
+    STORE_MAP
+    STORE_SUBSCR
+    DELETE_SUBSCR
+    BUILD_MAP
+
+控制流指令
+~~~~~~~~~~~~~~~~~
+::
+
+    BREAK_LOOP
+    POP_BLOCK
+    FOR_ITER
+    COMPARE_OP
+    JUMP_FORWARD
+    JUMP_IF_FALSE
+    JUMP_IF_TRUE
+    JUMP_ABSOLUTE
+    CONTINUE_LOOP
+    SETUP_LOOP
+
+异常处理指令
+^^^^^^^^^^^^^^^^^^
+::
+
+    RAISE_VARARGS
+    END_FINALLY
+    SETUP_EXCEPT
+    SETUP_FINALLY
+
+变量操作指令
+~~~~~~~~~~~~~~~~~~~~
+::
+
+    LOAD_LOCALS
+    LOAD_GLOBAL
+    LOAD_FAST
+    STORE_FAST
+    DELETE_FAST
+    LOAD_DEREF
+    STORE_DEREF
+
+    STORE_NAME
+    DELETE_NAME
+    STORE_GLOBAL
+    DELETE_GLOBAL
+    LOAD_CONST
+    LOAD_NAME
+
+函数调用指令
+~~~~~~~~~~~~~~~~~~~
+::
+
+    CALL_FUNCTION
+    MAKE_FUNCTION
+    MAKE_CLOSURE
+    LOAD_CLOSURE
+    CALL_FUNCTION_VAR
+    CALL_FUNCTION_KW
+    CALL_FUNCTION_VAR_KW
+    RETURN_VALUE
+
+class类操作指令
+~~~~~~~~~~~~~~~~~~~~
+::
+
+    BUILD_CLASS
+    STORE_ATTR
+    LOAD_ATTR
+    DELETE_ATTR
+   
+class实际上是函数，class的初始化，继承，MRO等逻辑，以及Python复杂的模块导入逻辑，
+没有在指令上体现出来，它们用C实现，被固化到VM了。
+
+模块导入指令
+~~~~~~~~~~~~~~~~~~
+::
+
+    IMPORT_STAR
+    IMPORT_NAME
+    IMPORT_FROM
+
+Python特殊语法指令
+~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+    WITH_CLEANUP # with
+    EXEC_STMT # exec
+    YIELD_VALUE # yield
+    GET_ITER # iter
+ 
+PRINT指令
+~~~~~~~~~~~~~~~~
+::
+
+    PRINT_EXPR
+    PRINT_ITEM
+    PRINT_NEWLINE
+    PRINT_ITEM_TO
+    PRINT_NEWLINE_TO
+
+Other
+~~~~~~~~~~~~~
+::
+
+    STOP_CODE
+    EXTENDED_ARG
+
 

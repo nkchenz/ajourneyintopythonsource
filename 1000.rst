@@ -70,11 +70,11 @@ Life of Exception
 
 本节主要关注几个问题:
 
-VM怎么知道有异常发生了？
+- VM怎么知道有异常发生了？
 
-VM怎么找到异常处理handler, 怎样一步步向上抛出直到被捕获的？找到之后又怎么处理呢？
+- VM怎么找到异常处理handler, 怎样一步步向上抛出直到被捕获的？找到之后又怎么处理呢？
 
-sys.exc_type和frame是什么关系?
+- sys.exc_type和frame是什么关系?
 
 从输出看来，sys.exc_type保存的是当前frame的上一个异常。bar中的KeyError异常，并不会覆盖调用者foo
 看到的sys.exc_type IOError。sys.exc_type并不是全局的，而是和frame相关的，当bar执行完毕之后返回foo之后，
