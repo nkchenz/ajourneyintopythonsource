@@ -1,17 +1,10 @@
 1718 Miles
 ==================
 
-FrameTimer
------------------
-对一个frame设置timer，如果到时仍未退出，则抛出异常
-在线程B中如果检查线程A设置的timer？触发线程切换并抛出异常
-怎么解决c扩展执行时间过长的问题？进入c函数前设置一个alarm，timer信号？
-
 http://eli.thegreenplace.net/2011/08/22/how-not-to-set-a-timeout-on-a-computation-in-python/#id5
 
 The Big Loop
 ---------------------------
-
 基于frame的vm，而不是想象中的结构:
 
 VM:
@@ -35,6 +28,13 @@ frame 结构中存有当前的堆栈信息
 
 遇到块结束的指令，调用 break
 其他指令则调用 continue，没有检查错误，也不用退出block，直接执行下一条指令
+
+堆，栈的概念
+
+
+状态
+Code对象：可执行码，程序本身
+Frame对象，stack：程序的执行状态
 
 
 Python VM 指令集构成
@@ -76,7 +76,6 @@ Python VM指令可以分为以下几大类。
     BINARY_MODULO
     BINARY_ADD
     BINARY_SUBTRACT
-    BINARY_SUBSCR
     BINARY_FLOOR_DIVIDE
     BINARY_TRUE_DIVIDE
     INPLACE_FLOOR_DIVIDE
@@ -88,8 +87,8 @@ Python VM指令可以分为以下几大类。
     INPLACE_MODULO
     INPLACE_POWER
 
-逻辑操作
-~~~~~~~~~~~~~~~~
+位操作指令
+^^^^^^^^^^^^^^^
 ::
 
     BINARY_LSHIFT
@@ -139,6 +138,7 @@ Dict操作
 ::
 
     STORE_MAP
+    BINARY_SUBSCR
     STORE_SUBSCR
     DELETE_SUBSCR
     BUILD_MAP
@@ -170,7 +170,6 @@ Dict操作
 变量操作指令
 ~~~~~~~~~~~~~~~~~~~~
 ::
-
     LOAD_LOCALS
     LOAD_GLOBAL
     LOAD_FAST
@@ -185,6 +184,8 @@ Dict操作
     DELETE_GLOBAL
     LOAD_CONST
     LOAD_NAME
+
+变量的作用域，查找机制在这些LOAD_XXX指令中。
 
 函数调用指令
 ~~~~~~~~~~~~~~~~~~~
@@ -208,8 +209,10 @@ class类操作指令
     LOAD_ATTR
     DELETE_ATTR
    
-class实际上是函数，class的初始化，继承，MRO等逻辑，以及Python复杂的模块导入逻辑，
-没有在指令上体现出来，它们用C实现，被固化到VM了。
+调用class创建对象，调用对象的方法，实际上都是函数调用。class的初始化，继承，MRO，magic方法等逻辑，
+以及Python模块导入逻辑，都没有在指令上体现出来，它们隐藏在指令的背后，用C实现，固化到VM了。
+
+整个python语言，要区分哪些在VM之上，哪些在VM之下。
 
 模块导入指令
 ~~~~~~~~~~~~~~~~~~
