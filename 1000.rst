@@ -600,6 +600,17 @@ finally的代码既是该block的handler。
 
 世界安静了，一切都在恰当的位置。
 
+Notes:
+
+- 异常机制之所以能起作用，需要有语言层面自动垃圾收集机制的配合。回溯查找handler时，
+  中间被rewind掉的blocks和frames，会释放对于其他objects的引用，栈被清空，一定程度上
+  完成了清理工作，最终由gc保证在引用为0时释放那些对象占用的内存
+
+- 对于独占文件锁，数据库连接等关键资源，最好使用finally语句执行恰当的cleanup。
+  原因一是 explicit is better than implicit, 二是系统gc时间不定，可能导致在较长时间内的
+  非预期资源占用
+
+
 自制极简socket模块
 --------------------------------
 socket是python网络通信的主要模块，它实际上只是_socket的一个简单wrap。通过分析_socket模块的
@@ -609,7 +620,7 @@ socket是python网络通信的主要模块，它实际上只是_socket的一个�
 如ipv6，gethostby*, inet_*等辅助性函数都不需要，也不用考虑平台可移植性，这样一个
 极简的可以工作socket模块会是什么样子呢?
 
-注：本例中的代码几乎全部copy自socketmodule.c
+注：虽然号称自制，但本例代码几乎全部copy自socketmodule.c
 
 完整代码: https://github.com/nkchenz/cpythonjourney/blob/sockmini/Modules/socketmini.c
 
