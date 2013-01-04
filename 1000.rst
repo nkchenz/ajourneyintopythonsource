@@ -347,7 +347,7 @@ why::
 
 
 好的，VM对why的处理到此结束，下面就开始寻找except handler了，对堆栈进行复杂的操作，
-不停的回溯frame，直到遇到一个except语句为止。
+不停的回溯block, frame，直到遇到一个except语句为止。
 
 except
 ~~~~~~~~~~~~~~~~~~~
@@ -418,17 +418,49 @@ try..except..finally对应的vm指令::
                  70 LOAD_CONST               3 (None)
                  73 RETURN_VALUE        
 
-SETUP_EXCEPT，SETUP_FINALLY: 初始化try block，记录except，finally的地址
 
-指令24 CALL_FUNCTION调用函数foo，如果没有异常，指令29直接跳转到54执行finally。
+SETUP_EXCEPT，SETUP_FINALLY::
 
-如果有异常，则指令24返回的时候，确切的说是foo函数的raise语句执行完之后，python vm就会启动异常处理机制，
-找到SETUP_EXCEPT记录的except地址32，调整堆栈，跳转到这里执行。注意，这个跳转是vm自动完成的，并没有对应的
-指令，这一部分的介绍见下节。
+        case SETUP_EXCEPT:
+        case SETUP_FINALLY:
+            /* NOTE: If you add any new block-setup opcodes that
+               are not try/except/finally handlers, you may need
+               to update the PyGen_NeedsFinalizing() function.
+               */
 
-进入handler之后，如果except匹配，则执行完处理语句后，指令50直接跳转到指令54执行finally。
-如果异常不匹配，指令39跳转到指令53，比匹配的情况多执行了一个END_FINALLY，reraise异常，
-即该异常也算被handle过了，只不过这个handle因为不匹配，选择重新抛出了异常::
+            PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
+                               STACK_LEVEL());
+            continue;
+
+可见一个try..except..finally，实际上生成了两级block，finally block套着except
+block。最内层block的handler由SETUP_EXCEPT指令设置为32，外层block的handler由SETUP_FINALLY
+指令设置为58。
+
+指令24 CALL_FUNCTION调用函数foo，如果没有异常，则指令28 pop掉内层block，指令29跳转到54，
+pop掉外层的finally block，开始执行finally部分。
+
+如果有异常，则指令24返回时，确切的说是foo函数的raise语句执行完之后，python vm就会启动异常处理机制，
+找到内层block的handler的except地址32，调整堆栈，跳转到这里执行。注意该跳转是vm自动完成的，
+并没有对应的python指令，这一部分的介绍见下节。
+
+开始执行内层block的handler 32时，由三种情况需要处理:
+
+- 异常匹配
+
+- 异常匹配，但是处理的过程中又发生异常了
+
+- 异常不匹配
+
+不管怎样，都要保证finally部分被执行，我们来看下python是怎么做到的。  
+
+对于第一种情况，异常匹配到了，而且执行的时候很顺利，没有再发生任何异常，则指令50又跳转到了54，
+和上面没有发生异常的情形一样，去执行finally了。
+
+第二种情况，处理异常的时候又发生了异常，则handler的执行会被强行终止，python
+vm会重新启动异常查找机制，此时回溯到的外层block恰好是finally的block，其handler为指令54，同样保证了finally的执行。
+
+第三种情况，异常不匹配，但是注意我们事实上已经进入内层block的handler 指令32了，
+COMPARE_OP比较是否是我们要匹配的异常，不匹配则POP_JUMP_IF_FALSE指令39跳转到指令53，执行END_FINALLY::
 
     case END_FINALLY:
             v = POP();
@@ -447,18 +479,27 @@ SETUP_EXCEPT，SETUP_FINALLY: 初始化try block，记录except，finally的地�
             Py_DECREF(v);
             break;
 
-指令53执行完后，也执行了finally部分代码。可见，python vm生成的try block handler编译码，
-保证了不管在什么情况下，finally都会得到执行。
+END_FINALLY做了什么呢？END_FINALLY 又恢复了异常信息，然后就像RAISE_VARARGS一样，
+break掉大switch语句，异常的进一步处理又交还给了python vm。至此，第三种情况归约为了第二种情况。
 
-如果try有多个except语句，也和此类似，实际上try的handler只有一个，多个except只是
+.. note::
+
+    要注意区分大switch case的break和continue语句，continue继续执行下一条指令，是在同一个block内。
+    而break则会跳转到fast_block_end，表示一个block要结束了，这通常表示控制流的变换，如RAISE_VARARGS指令
+    结束一个block，往上回溯找handler，END_FINALLY指令结束except块或finally块
+
+    进一步分析见 Python VM Loop
+
+
+如果try有多个except语句，也和此类似，实际上内层block的handler只有一个，多个except只是
 对应于该handler里的多个条件判断。SETUP_EXCEPT指令只记录第一个except的跳转地址。
 
-如果try没有except语句，那么就不会有SETUP_EXCEPT指令，而只有一个SETUP_FINALLY指令，
-finally的代码既是该block的handler。
+如果try没有except语句，那么就不会有SETUP_EXCEPT指令，而只有一个SETUP_FINALLY指令，也就是说只有一层block。
 
 寻找handler
 ^^^^^^^^^^^^^^^^^^^^^
-::
+只有在一个block结束的时候，不管是正常结束，还是发生了异常，python vm才会进行异常处理，
+查找是否有可用handler::
 
             /* Unwind stacks if a (pseudo) exception occurred */
 
