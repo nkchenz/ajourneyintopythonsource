@@ -36,6 +36,19 @@ frame 结构中存有当前的堆栈信息
 Code对象：可执行码，程序本身
 Frame对象，stack：程序的执行状态
 
+Frame, Block and Statement
+----------------------------------
+statement比较好理解，一行基本上就是一个statement。block在statement之上，每个
+block可以有多个statement，是语句块。if，while，try，for等带:的keyword，
+都表示一个新block的开始。
+
+block是最小的控制转移单位，在block之内statement被顺序执行，条件判断，循环，异常处理等
+机制都必须借助与block才能实现。运行时，python也会记录block的层级信息，因为异常处理
+时需要用到，查找本block的handler。
+
+函数可以看做是代码重用的最小单位，函数内可以有多个，多层block。函数对应于PyCode Object，
+每次调用一个函数时，都会生成一个新的frame，所以说frame实际上负责存储运行状态，
+是运行时的函数调用栈。
 
 Python VM 指令集构成
 --------------------------
