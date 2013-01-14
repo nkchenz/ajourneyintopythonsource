@@ -457,7 +457,7 @@ pop掉外层的finally block，开始执行finally部分。
 和上面没有发生异常的情形一样，去执行finally了。
 
 第二种情况，处理异常的时候又发生了异常，则handler的执行会被强行终止，python
-vm会重新启动异常查找机制，此时回溯到的外层block恰好是finally的block，其handler为指令54，同样保证了finally的执行。
+vm会重新启动异常查找机制，此时回溯到的外层block恰好是finally的block，其handler为指令58，同样保证了finally的执行。
 
 第三种情况，异常不匹配，但是注意我们事实上已经进入内层block的handler 指令32了，
 COMPARE_OP比较是否是我们要匹配的异常，不匹配则POP_JUMP_IF_FALSE指令39跳转到指令53，执行END_FINALLY::
